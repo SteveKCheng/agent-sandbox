@@ -1,0 +1,252 @@
+#!/bin/bash
+set -e
+
+script_real_dir="$(dirname "$(readlink -f "$0")")"
+
+# Defaults
+env_file=
+etc_dir=
+dry_run=0
+is_openssh=0
+
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS] [--] program args...
+
+Options:
+  -d, --dry-run         Just show the bwrap command to execute, 
+                        and not actually create the sandbox
+  -e, --etc-dir PATH    Set the path to the directory containing a template for /etc
+                        inside the sandbox
+  -E, --env-file PATH   File with NAME=VALUE pairs for environment variables to set
+  -h, --host-name NAME  Override the name of the host in the sandbox
+  -S, --openssh         Adapt for OpenSSH's sshd, e.g. environment-variable settings
+
+  --help                Display this help text
+
+EOF
+    exit 0
+}
+
+# Call GNU getopt to canonicalize arguments.
+# -o defines short options ('h' takes no arg, 'n:' takes a required arg)
+# -l defines long options ('help' takes no arg, 'name:' takes a required arg)
+parsed=$(getopt -o "de:E:h:S" --long "help,dry-run,etc-dir:,env-file:,host-name:,openssh" -n "$0" -- "$@")
+if [ $? -ne 0 ]; then
+    exit 1
+fi
+
+# Re-assign positional parameters using eval to safely retain quotes/spaces
+eval set -- "$parsed"
+
+# Parse options until reaching the '--' separator
+while true; do
+    case "$1" in
+        --help)
+            usage
+            ;;
+        -e|--etc-dir)
+            etc_dir="$2"
+            shift 2
+            ;;
+        -d|--dry-run)
+            dry_run=1
+            shift
+            ;;
+        -E|--env-file)
+            env_file="$2"
+            shift 2
+            ;;
+        -h|--host-name)
+            host_name="$2"
+            shift 2
+            ;;
+        -S|--openssh)
+            is_openssh=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo >&2 "$0: internal argument parsing error"
+            exit 1
+            ;;
+    esac
+done
+
+# Process remaining positional arguments (if any)
+if [ $# -eq 0 ]; then
+    echo >&2 "$0: program to run must be specified"
+    exit 1
+fi
+
+# Work directories:
+#   These are mounted read-write.
+work_whitelist=(
+  "$HOME/.nuget/packages/"
+  "$HOME/dev/Mallard/"
+  "$HOME/dev/duckdb/"
+  "$HOME/.duckdb/"
+  "$HOME/.dotnet/"
+)
+
+# Config files:
+#   If there are symbolic links, the links will be resolved 
+#   immediately, but not within sub-directories.
+#   Mounted read-only.
+config_whitelist=(
+  "$HOME/.gitconfig"
+  "$HOME/.nuget/NuGet/NuGet.Config"
+  "$HOME/.vimrc"
+
+  # Networking
+  "/etc/nsswitch.conf"
+  "/etc/hosts"
+  "/etc/resolv.conf"
+  
+  # TLS/SSL Certificates
+  "/etc/ssl/"
+  "/etc/pki/"
+  "/etc/ca-certificates/"
+  
+  # Dynamic Linker & Distro Info
+  "/etc/ld.so.conf"
+  "/etc/ld.so.conf.d/"
+  "/etc/ld.so.cache"
+  "/etc/os-release"
+  "/etc/localtime"
+  "/etc/alternatives/"
+)
+
+bwrap_args=(
+  --unshare-user-try 
+  --unshare-ipc 
+  --unshare-pid 
+  --unshare-net 
+  --unshare-cgroup-try
+  # --unshare-all
+)
+
+if [ -n "${host_name}" ] ; then
+    bwrap_args+=( --unshare-uts --hostname "${host_name}" )
+fi
+
+bwrap_args+=( 
+  --proc /proc
+  --dev /dev
+
+  --mqueue /dev/mqueue
+
+  # Set up /tmp directory
+  --perms 1777 --tmpfs /tmp
+
+  # Set up /run directory
+  --tmpfs /run
+  --dir /run/lock 
+
+  # Set up /var directory structure
+  --dir /var
+  --symlink ../run /var/run
+  --symlink ../run/lock /var/lock
+  --symlink ../tmp /var/tmp
+  --tmpfs /var/cache
+
+  # Set up base home directory that is writable since many tools/apps depend on that.
+  # Note that except for explicitly bind-mounted "work" directories, changes 
+  # will not be persisted outside the sandbox.
+  --tmpfs "$HOME"
+)
+
+
+
+# System files: 
+#   If there are symbolic links, the links will not be resolved 
+#   immediately, but will be retained and carried over into the sandbox.
+#   Mounted read-only.
+system_whitelist=(
+    /usr
+    /bin
+    /lib
+    /lib64
+    /opt
+)
+
+for path in "${system_whitelist[@]}"; do
+    if [ -L "$path" ] ; then
+        link_target="$(readlink -n "$path")"
+        bwrap_args+=( --symlink "$link_target" "$path" )
+    else
+        bwrap_args+=( --ro-bind-try "$path" "$path" )
+    fi
+done
+
+for path in "${config_whitelist[@]}"; do
+    bwrap_args+=( --ro-bind-try "$path" "$path" )
+done
+
+for path in "${work_whitelist[@]}"; do
+    bwrap_args+=( --bind-try "$path" "$path" )
+done
+
+if [ -n "$etc_dir" ] ; then
+    shopt -s nullglob
+    for path in "$etc_dir"/*; do 
+        dest="/etc/$(basename "$path")"
+        if [ -L "$path" ] ; then
+            link_target="$(readlink -n "$path")"
+            bwrap_args+=( --symlink "$link_target" "$dest" )
+        else
+            bwrap_args+=( --ro-bind-try "$path" "$dest" )
+        fi
+    done
+fi
+
+bwrap_args+=( --clearenv )
+
+# Propagate TERM like ssh does
+bwrap_args+=( --setenv TERM "$TERM" )
+
+if [ -n "${env_file}" ] ; then
+
+    if [ "$is_openssh" -ne 0 ] ; then
+        # sshd will not pass the environment variables it is invoked with to
+        # the sandbox user's log-in session.
+        #
+        # Instead, just bind-mount the file into $HOME/.ssh/environment assuming 
+        # "PermitUserEnvironment yes" has been set in /etc/ssh/sshd_config.
+        bwrap_args+=( --ro-bind "${env_file}" "$HOME/.ssh/environment" )
+    else
+        # Create --setenv arguments for bwrap for each NAME=VALUE pair
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Trim leading/trailing whitespace
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+    
+            # Skip empty lines and comment lines
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+    
+            # Parse KEY=VALUE using regex (ensures valid bash variable name format)
+            if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+                key="${BASH_REMATCH[1]}"
+                val="${BASH_REMATCH[2]}"
+            fi
+    
+            bwrap_args+=("--setenv" "$key" "$val")
+        done < "$env_file"
+    fi
+fi
+
+# Seal the root filesystem to be read-only after all modifications
+bwrap_args+=( --remount-ro / )
+
+bwrap_args+=( --chdir "$HOME" )
+
+
+if [ "$dry_run" -ne 0 ] ; then
+    echo exec /usr/bin/bwrap "${bwrap_args[@]}" -- "$@"
+else
+    /usr/bin/bwrap --args 9 -- "$@" 9< <(printf '%s\0' "${bwrap_args[@]}")
+fi
+

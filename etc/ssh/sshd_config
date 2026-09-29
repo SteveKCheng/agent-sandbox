@@ -1,0 +1,27 @@
+# Point to user-owned host key and PID file
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile /tmp/sshd.pid
+
+# Disable all features requiring root/PAM
+UsePAM no
+StrictModes no
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+
+# Only allow public key authentication
+AuthorizedKeysFile /etc/ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+
+# Allow terminal apps like interactive shells
+AcceptEnv TERM COLORTERM LANG LC_*
+PermitTTY yes
+
+# Enable SFTP to work
+Subsystem sftp internal-sftp
+
+# Enable easy customization of environment variables
+# through a separate file in the sandbox
+PermitUserEnvironment yes

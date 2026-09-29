@@ -1,0 +1,32 @@
+# /etc/bashrc - Minimal sandbox shell initialization
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# Determine terminal color support
+case "$TERM" in
+    xterm*|rxvt*|screen*|tmux*|vt100*|linux*|*color*)
+        COLOR_PROMPT=1
+        alias ls='ls --color=auto'
+        alias grep='grep --color=auto'
+        ;;
+    *)
+        COLOR_PROMPT=0
+        ;;
+esac
+
+if [ "$COLOR_PROMPT" -eq 1 ]; then
+    # Fedora-style colors:
+    # \[\033[01;32m\] : Bold Green for user@host
+    # \[\033[01;34m\] : Bold Blue for working directory
+    # \[\033[00m\]    : Reset text attributes
+    PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    # Plain monochromatic fallback
+    PS1='\u@\h:\w\$ '
+fi
+
+export PS1
