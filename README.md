@@ -7,7 +7,7 @@ Its goal is to allow agents to access the Linux command line, while not allowing
   - to modify any host system-installed binaries
   - to read or modify the host system configuration (so secrets are not leaked)
   - to read or modify any of the user's files except white-listed ones
-  - (optionally) to access the network
+  - (optionally) to access the network, with (app-specific) firewalling
 
 No root privileges are needed.  The script, written in GNU Bash, runs under your normal user account.  
 
