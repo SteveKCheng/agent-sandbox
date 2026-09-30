@@ -21,7 +21,7 @@ table inet agent_sandbox_filter {
     }
 
     chain output {
-        type filter hook output priority 0; policy drop;
+        type filter hook output priority 0
 
         # Allow internal loopback, for running local servers
         oif "lo" accept
@@ -44,5 +44,7 @@ table inet agent_sandbox_filter {
 
         # Allow established/related incoming responses
         ct state established,related accept
+
+        reject
     }
 }
