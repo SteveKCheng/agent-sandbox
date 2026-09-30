@@ -12,13 +12,16 @@ is_openssh=0
 share_net=0
 tunnel_net=0
 
+bwrap_path="${AGENT_BWRAP_PATH:-bwrap}"
+pasta_path="${AGENT_PASTA_PATH:-pasta}"
+
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS] [--] program args...
 
 Options:
-  -d, --dry-run         Just show the bwrap command to execute, 
-                        and not actually create the sandbox
+  -d, --dry-run         Just show the "bwrap" command to execute, 
+                        and not actually create the sandbox or run the target program
   -e, --etc-dir PATH    Set the path to the directory containing a template for /etc
                         inside the sandbox
   -E, --env-file PATH   File with NAME=VALUE pairs for environment variables to set
@@ -26,6 +29,13 @@ Options:
   -S, --openssh         Adapt for OpenSSH's sshd, e.g. environment-variable settings
   -N, --share-net       Share network with the host
   -n, --tunnel-net      Sandbox tunnels network communications to host
+
+  --bwrap-path          Path to "bwrap" program used for sandboxing
+                        Defaults to the environment variable AGENT_BWRAP_PATH, 
+                        or if that is not defined, then "bwrap" as found on PATH
+  --pasta-path          Path to "pasta" program used for network tunnelling
+                        Defaults to the environment variable AGENT_PASTA_PATH, 
+                        or if that is not defined, then "pasta" as found on PATH
 
   --help                Display this help text
 
@@ -36,7 +46,9 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-parsed=$(getopt -o "de:E:h:SNn" --long "help,dry-run,etc-dir:,env-file:,host-name:,openssh,share-net,tunnel-net" -n "$0" -- "$@")
+short_options="de:E:h:SNn"
+long_options="help,dry-run,etc-dir:,env-file:,host-name:,openssh,share-net,tunnel-net,bwrap-path:,pasta-path:"
+parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
 fi
@@ -55,6 +67,8 @@ while true; do
         -S|--openssh)    is_openssh=1; shift;;
         -N|--share-net)  share_net=1; shift;;
         -n|--tunnel-net) tunnel_net=1; shift;;
+        --bwrap-path)    bwrap_path="$2"; shift 2;;
+        --pasta-path)    pasta_path="$2"; shift 2;;
         --)
             shift
             break
@@ -247,7 +261,7 @@ bwrap_args+=( --remount-ro / )
 #      will be $HOME, which is the behavior we want.
 
 if [ "$dry_run" -ne 0 ] ; then
-    echo /usr/bin/bwrap "${bwrap_args[@]}" -- "$@"
+    echo "$bwrap_path" "${bwrap_args[@]}" -- "$@"
     exit 0
 fi
 
@@ -255,7 +269,7 @@ fi
 if [ "$tunnel_net" -eq 0 ] ; then
 
     # Run bwrap with set-up arguments sent on FD 9
-    /usr/bin/bwrap --args 9 -- "$@" 9< <(printf '%s\0' "${bwrap_args[@]}") || exit $?
+    "$bwrap_path" --args 9 -- "$@" 9< <(printf '%s\0' "${bwrap_args[@]}") || exit $?
 
 else
 
@@ -297,8 +311,8 @@ else
     target_uid=$(id -u)
     target_gid=$(id -g)
 
-    /usr/bin/pasta --config-net --ns-ifname sandbox_tap --no-dhcp -- \
-        /usr/bin/bwrap --uid $target_uid --gid $target_gid "${bwrap_args[@]}" -- "$@" 
+    "$pasta_path" --config-net --ns-ifname sandbox_tap --no-dhcp -- \
+        "$bwrap_path" --uid $target_uid --gid $target_gid "${bwrap_args[@]}" -- "$@" 
 
 fi
 
