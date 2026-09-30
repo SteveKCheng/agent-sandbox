@@ -5,6 +5,7 @@ script_real_dir="$(dirname "$(readlink -f "$0")")"
 
 # Defaults
 env_file=
+filter_file=
 etc_dir=
 dry_run=0
 host_name=
@@ -20,22 +21,23 @@ usage() {
 Usage: $0 [OPTIONS] [--] program args...
 
 Options:
-  -d, --dry-run         Just show the "bwrap" command to execute, 
-                        and not actually create the sandbox or run the target program
-  -e, --etc-dir PATH    Set the path to the directory containing a template for /etc
-                        inside the sandbox
-  -E, --env-file PATH   File with NAME=VALUE pairs for environment variables to set
-  -h, --host-name NAME  Override the name of the host in the sandbox
-  -S, --openssh         Adapt for OpenSSH's sshd, e.g. environment-variable settings
-  -N, --share-net       Share network with the host
-  -n, --tunnel-net      Sandbox tunnels network communications to host
+  -d, --dry-run           Just show the "bwrap" command to execute, 
+                          and not actually create the sandbox or run the target program
+  -e, --etc-dir PATH      Set the path to the directory containing a template for /etc
+                          inside the sandbox
+  -f, --filter-file PATH  Firewall rules for the Linux kernel's "nftables" engine
+  -E, --env-file PATH     File with NAME=VALUE pairs for environment variables to set
+  -h, --host-name NAME    Override the name of the host in the sandbox
+  -S, --openssh           Adapt for OpenSSH's sshd, e.g. environment-variable settings
+  -N, --share-net         Share network with the host
+  -n, --tunnel-net        Sandbox tunnels network communications to host
 
-  --bwrap-path          Path to "bwrap" program used for sandboxing
-                        Defaults to the environment variable AGENT_BWRAP_PATH, 
-                        or if that is not defined, then "bwrap" as found on PATH
-  --pasta-path          Path to "pasta" program used for network tunnelling
-                        Defaults to the environment variable AGENT_PASTA_PATH, 
-                        or if that is not defined, then "pasta" as found on PATH
+  --bwrap-path            Path to "bwrap" program used for sandboxing
+                          Defaults to the environment variable AGENT_BWRAP_PATH, 
+                          or if that is not defined, then "bwrap" as found on PATH
+  --pasta-path            Path to "pasta" program used for network tunnelling
+                          Defaults to the environment variable AGENT_PASTA_PATH, 
+                          or if that is not defined, then "pasta" as found on PATH
 
   --help                Display this help text
 
@@ -46,8 +48,8 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-short_options="de:E:h:SNn"
-long_options="help,dry-run,etc-dir:,env-file:,host-name:,openssh,share-net,tunnel-net,bwrap-path:,pasta-path:"
+short_options="de:E:f:h:SNn"
+long_options="help,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -60,15 +62,16 @@ eval set -- "$parsed"
 while true; do
     case "$1" in
         --help)          usage;;
-        -e|--etc-dir)    etc_dir="$2"; shift 2;;
-        -d|--dry-run)    dry_run=1; shift;;
-        -E|--env-file)   env_file="$2"; shift 2;;
-        -h|--host-name)  host_name="$2"; shift 2;;
-        -S|--openssh)    is_openssh=1; shift;;
-        -N|--share-net)  share_net=1; shift;;
-        -n|--tunnel-net) tunnel_net=1; shift;;
-        --bwrap-path)    bwrap_path="$2"; shift 2;;
-        --pasta-path)    pasta_path="$2"; shift 2;;
+        -e|--etc-dir)     etc_dir="$2"; shift 2;;
+        -d|--dry-run)     dry_run=1; shift;;
+        -E|--env-file)    env_file="$2"; shift 2;;
+        -f|--filter-file) filter_file="$2"; shift 2;;
+        -h|--host-name)   host_name="$2"; shift 2;;
+        -S|--openssh)     is_openssh=1; shift;;
+        -N|--share-net)   share_net=1; shift;;
+        -n|--tunnel-net)  tunnel_net=1; shift;;
+        --bwrap-path)     bwrap_path="$2"; shift 2;;
+        --pasta-path)     pasta_path="$2"; shift 2;;
         --)
             shift
             break
@@ -337,6 +340,11 @@ else
         bwrap_args+=( --hostname ${host_name} )
     fi
 
+    if [ "${host_name}" = "gateway" ] ; then
+        echo >&2 "$0: sandbox cannot be named 'gateway'"
+        exit 2
+    fi
+
     bwrap_args+=( --remount-ro / )
 
     # Prepare to write temporary files for data to pass to bwrap.
@@ -358,12 +366,22 @@ EOF
 
     # Generate /etc/hosts containing the host name that was set
     cat > "$tmp_dir/hosts" <<EOF
-::1         localhost 
 127.0.0.1   localhost
-fe80::2     ${host_name}
+::1         localhost 
 169.254.0.2 ${host_name}
-
+fe80::2     ${host_name}
+169.254.0.1 gateway
+fe80::1     gateway
 EOF
+
+    # Let the inner script know about the NFT filter file passed in by the user.
+    #
+    # Ideally we would check validity first, so that the sandbox is not started half-way 
+    # if there turns out to be an error in the filter rules, but unfortunately even
+    # checking the file requires root privileges (without the current user namespace).
+    if [ -n "$filter_file" ] ; then
+        ln -s "$(realpath "$filter_file")" "$tmp_dir/main.nft" 
+    fi
 
     "$pasta_path" \
         --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1 \
@@ -375,7 +393,8 @@ EOF
             exec 137< "$tmp_dir/bwrap_args"
             exec 138< "$tmp_dir/resolv.conf"
             exec 139< "$tmp_dir/hosts"
-            rm -f "$tmp_dir/bwrap_args" "$tmp_dir/resolv.conf" "$tmp_dir/hosts"
+            [[ ! -e "$tmp_dir/main.nft" ]] || strace -o strace.log nft -o -f "$tmp_dir/main.nft"
+            rm -f "$tmp_dir/bwrap_args" "$tmp_dir/resolv.conf" "$tmp_dir/hosts" "$tmp_dir/main.nft"
             exec bwrap --args 137 -- "$@" 
         ' _bwrap.sh "$tmp_dir" "$@"
 
