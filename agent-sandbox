@@ -374,6 +374,23 @@ fe80::2     ${host_name}
 fe80::1     gateway
 EOF
 
+    # Inner script to run under pasta.  Even though this script is static,
+    # we write it out to a file so the command line of the program does not
+    # become so cluttered.  And we prefer this script to be self-contained
+    # rather than relying on the user to pleace the helper script beside
+    # this shell script.
+    cat > "$tmp_dir/nft_then_bwrap.sh" <<"EOF"
+#!/bin/bash
+set -euo pipefail
+tmp_dir="$(dirname "$(realpath "$0")")"
+exec 137< "$tmp_dir/bwrap_args"
+exec 138< "$tmp_dir/resolv.conf"
+exec 139< "$tmp_dir/hosts"
+[[ ! -e "$tmp_dir/main.nft" ]] || nft -o -f "$tmp_dir/main.nft" 
+rm -f "$tmp_dir/bwrap_args" "$tmp_dir/resolv.conf" "$tmp_dir/hosts" "$tmp_dir/main.nft" "$0"
+exec bwrap --args 137 -- "$@" 
+EOF
+
     # Let the inner script know about the NFT filter file passed in by the user.
     #
     # Ideally we would check validity first, so that the sandbox is not started half-way 
@@ -387,16 +404,7 @@ EOF
         --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1 \
         --address fe80::2/10 --gateway fe80::1 --dns-forward fe80::1 \
         --config-net --ns-ifname sandbox_tap --no-dhcp -- \
-        /bin/bash -c '
-            tmp_dir="$1"
-            shift
-            exec 137< "$tmp_dir/bwrap_args"
-            exec 138< "$tmp_dir/resolv.conf"
-            exec 139< "$tmp_dir/hosts"
-            [[ ! -e "$tmp_dir/main.nft" ]] || strace -o strace.log nft -o -f "$tmp_dir/main.nft"
-            rm -f "$tmp_dir/bwrap_args" "$tmp_dir/resolv.conf" "$tmp_dir/hosts" "$tmp_dir/main.nft"
-            exec bwrap --args 137 -- "$@" 
-        ' _bwrap.sh "$tmp_dir" "$@"
+        /bin/bash "$tmp_dir/nft_then_bwrap.sh" "$@"
 
 fi
 
