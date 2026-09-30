@@ -382,11 +382,11 @@ EOF
     cat > "$tmp_dir/nft_then_bwrap.sh" <<"EOF"
 #!/bin/bash
 set -euo pipefail
-tmp_dir="$(dirname "$(realpath "$0")")"
+tmp_dir="$(dirname "$0")"
 exec 137< "$tmp_dir/bwrap_args"
 exec 138< "$tmp_dir/resolv.conf"
 exec 139< "$tmp_dir/hosts"
-[[ ! -e "$tmp_dir/main.nft" ]] || nft -o -f "$tmp_dir/main.nft" 
+[[ ! -L "$tmp_dir/main.nft" ]] || nft -o -f "$tmp_dir/main.nft" 
 rm -f "$tmp_dir/bwrap_args" "$tmp_dir/resolv.conf" "$tmp_dir/hosts" "$tmp_dir/main.nft" "$0"
 exec bwrap --args 137 -- "$@" 
 EOF
@@ -397,6 +397,10 @@ EOF
     # if there turns out to be an error in the filter rules, but unfortunately even
     # checking the file requires root privileges (without the current user namespace).
     if [ -n "$filter_file" ] ; then
+        if [ ! -e "$filter_file" ] ; then
+            echo >&2 "$0: nft filter file $filter_file does not exist"
+            exit 2
+        fi
         ln -s "$(realpath "$filter_file")" "$tmp_dir/main.nft" 
     fi
 
