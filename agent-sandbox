@@ -13,8 +13,8 @@ is_openssh=0
 share_net=0
 tunnel_net=0
 
-bwrap_path="${AGENT_BWRAP_PATH:-bwrap}"
-pasta_path="${AGENT_PASTA_PATH:-pasta}"
+bwrap_path="${AGENT_BWRAP_PATH:-"$(which bwrap 2>/dev/null || true)"}"
+pasta_path="${AGENT_PASTA_PATH:-"$(which pasta 2>/dev/null || true)"}"
 
 usage() {
     cat <<EOF
@@ -282,6 +282,11 @@ if [ "$dry_run" -ne 0 ] ; then
     exit 0
 fi
 
+# Check for existence of bwrap
+if [ ! -x "$bwrap_path" ] ; then
+    echo >&2 "$0: the bwrap program is required to run but could not be found"
+    exit 2
+fi
 
 if [ "$tunnel_net" -eq 0 ] ; then
     if [ -n "$filter_file" ] ; then
@@ -296,6 +301,12 @@ if [ "$tunnel_net" -eq 0 ] ; then
     "$bwrap_path" --args 137 -- "$@" 137< <(printf '%s\0' "${bwrap_args[@]}") || exit $?
 
 else
+
+    # Check for existence of pasta
+    if [ ! -x "$pasta_path" ] ; then
+        echo >&2 "$0: the pasta program is required for --tunnel-net but could not be found"
+        exit 2
+    fi
 
     # Launch bwrap wrapped in pasta.
     # pasta creates the network namespace that does Layer-4 tunnelling.
