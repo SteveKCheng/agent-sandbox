@@ -25,7 +25,8 @@ Options:
                           and not actually create the sandbox or run the target program
   -e, --etc-dir PATH      Set the path to the directory containing a template for /etc
                           inside the sandbox
-  -f, --filter-file PATH  Firewall rules for the Linux kernel's "nftables" engine
+  -f, --filter-file PATH  Firewall rules for the Linux kernel's "nftables" engine.
+                          This option may only be specified together with --tunnel-net.
   -E, --env-file PATH     File with NAME=VALUE pairs for environment variables to set
   -h, --host-name NAME    Override the name of the host in the sandbox
   -S, --openssh           Adapt for OpenSSH's sshd, e.g. environment-variable settings
@@ -283,6 +284,11 @@ fi
 
 
 if [ "$tunnel_net" -eq 0 ] ; then
+    if [ -n "$filter_file" ] ; then
+        echo >&2 "$0: filter file can only be specified when tunnelling network"
+        exit 1
+    fi
+
     # Seal the root filesystem to be read-only after all modifications
     bwrap_args+=( --remount-ro / )
 
