@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 script_real_dir="$(dirname "$(readlink -f "$0")")"
 
@@ -7,7 +7,10 @@ script_real_dir="$(dirname "$(readlink -f "$0")")"
 env_file=
 etc_dir=
 dry_run=0
+host_name=
 is_openssh=0
+share_net=0
+tunnel_net=0
 
 usage() {
     cat <<EOF
@@ -21,6 +24,8 @@ Options:
   -E, --env-file PATH   File with NAME=VALUE pairs for environment variables to set
   -h, --host-name NAME  Override the name of the host in the sandbox
   -S, --openssh         Adapt for OpenSSH's sshd, e.g. environment-variable settings
+  -N, --share-net       Share network with the host
+  -n, --tunnel-net      Sandbox tunnels network communications to host
 
   --help                Display this help text
 
@@ -31,7 +36,7 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-parsed=$(getopt -o "de:E:h:S" --long "help,dry-run,etc-dir:,env-file:,host-name:,openssh" -n "$0" -- "$@")
+parsed=$(getopt -o "de:E:h:SNn" --long "help,dry-run,etc-dir:,env-file:,host-name:,openssh,share-net,tunnel-net" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
 fi
@@ -42,29 +47,14 @@ eval set -- "$parsed"
 # Parse options until reaching the '--' separator
 while true; do
     case "$1" in
-        --help)
-            usage
-            ;;
-        -e|--etc-dir)
-            etc_dir="$2"
-            shift 2
-            ;;
-        -d|--dry-run)
-            dry_run=1
-            shift
-            ;;
-        -E|--env-file)
-            env_file="$2"
-            shift 2
-            ;;
-        -h|--host-name)
-            host_name="$2"
-            shift 2
-            ;;
-        -S|--openssh)
-            is_openssh=1
-            shift
-            ;;
+        --help)          usage;;
+        -e|--etc-dir)    etc_dir="$2"; shift 2;;
+        -d|--dry-run)    dry_run=1; shift;;
+        -E|--env-file)   env_file="$2"; shift 2;;
+        -h|--host-name)  host_name="$2"; shift 2;;
+        -S|--openssh)    is_openssh=1; shift;;
+        -N|--share-net)  share_net=1; shift;;
+        -n|--tunnel-net) tunnel_net=1; shift;;
         --)
             shift
             break
@@ -79,6 +69,11 @@ done
 # Process remaining positional arguments (if any)
 if [ $# -eq 0 ]; then
     echo >&2 "$0: program to run must be specified"
+    exit 1
+fi
+
+if (( share_net + tunnel_net > 1 )) ; then
+    echo >&2 "$0: cannot specify both --share-net and --tunnel-net"
     exit 1
 fi
 
@@ -121,16 +116,20 @@ config_whitelist=(
 )
 
 bwrap_args=(
-  --unshare-user-try 
-  --unshare-ipc 
-  --unshare-pid 
-  --unshare-net 
-  --unshare-cgroup-try
-  # --unshare-all
+  --die-with-parent
+
+  --unshare-all
 )
 
 if [ -n "${host_name}" ] ; then
-    bwrap_args+=( --unshare-uts --hostname "${host_name}" )
+    bwrap_args+=( --hostname "${host_name}" )
+fi
+
+# Enable networking if requested.
+# (For "tunnelling", bwrap inherits not the host's network namespace 
+#  but the network namespace set up by pasta, below.)
+if [ "$share_net" -ne 0 ] || [ "$tunnel_net" -ne 0 ] ; then
+    bwrap_args+=( --share-net )
 fi
 
 bwrap_args+=( 
@@ -241,12 +240,65 @@ fi
 # Seal the root filesystem to be read-only after all modifications
 bwrap_args+=( --remount-ro / )
 
-bwrap_args+=( --chdir "$HOME" )
 
+
+# N.B. According to bwrap's documentation, the current directory in the sandbox is 
+#      the same as this process's current directory if it exists; otherwise it
+#      will be $HOME, which is the behavior we want.
 
 if [ "$dry_run" -ne 0 ] ; then
-    echo exec /usr/bin/bwrap "${bwrap_args[@]}" -- "$@"
+    echo /usr/bin/bwrap "${bwrap_args[@]}" -- "$@"
+    exit 0
+fi
+
+
+if [ "$tunnel_net" -eq 0 ] ; then
+
+    # Run bwrap with set-up arguments sent on FD 9
+    /usr/bin/bwrap --args 9 -- "$@" 9< <(printf '%s\0' "${bwrap_args[@]}") || exit $?
+
 else
-    /usr/bin/bwrap --args 9 -- "$@" 9< <(printf '%s\0' "${bwrap_args[@]}")
+
+    # Launch bwrap wrapped in pasta.
+    # pasta creates the network namespace that does Layer-4 tunnelling.
+    #
+    # Although bwrap does allow some other process (pasta) to alter the configuration
+    # the network namespace it creates to add tunnelling, in practice that feature
+    # does not work, because:
+    #
+    #   (a) It gets clumsy to synchronize the different phases of execution 
+    #       of bwrap with external programs, especially in a shell script.
+    #
+    #   (b) A network namespace cannot be configured without the SYS_CAP_ADMIN
+    #       capability within the parent user namespace.  But for a *unprivileged* 
+    #       sandbox, SYS_CAP_ADMIN can only be retained if the sandbox's UID is 0 
+    #       (root; as set by the --uid option to bwrap).  The Linux kernel has a hard
+    #       security restriction that unprivileged users on the host cannot create
+    #       multiple users in new user namespaces (unless SETUID helpers are used).
+    #
+    #       So, for an unprivileged user, if the sandbox's UID is set to non-zero,
+    #       the ability to configure the network namespace is permanently sealed off.
+    #
+    #       If you have strace log what pasta is doiing, you will see that if it is 
+    #       asked to modify a network namespace with no UID=0 in its containing user 
+    #       namespace, the system call to switch into the network namespace, 
+    #       setns(net_ns_fd, CLONE_NEWNET), will always fail.
+    #
+    # The solution is to have pasta create its own "throw-away" user namespace with 
+    # UID=0 inside so it can configure a new network namespace with tunnelling.
+    # Then when it forks and executes bwrap, bwrap automatically inherits that network 
+    # namespace avoiding the failure with setns(net_ns_fd, CLONE_NEWNET).  
+    #
+    # bwrap will then proceed to create its own user namespace with the UID set to
+    # non-zero (optionally).
+    
+    # Need to specify UID and GID explicitly for bwrap because pasta creates a user
+    # namespace with UID=0 first
+    target_uid=$(id -u)
+    target_gid=$(id -g)
+
+    /usr/bin/pasta --config-net --ns-ifname sandbox_tap --no-dhcp -- \
+        /usr/bin/bwrap --uid $target_uid --gid $target_gid "${bwrap_args[@]}" -- "$@" 
+
 fi
 
