@@ -115,22 +115,30 @@ config_whitelist=(
   "$HOME/.vimrc"
 
   # Networking
-  "/etc/nsswitch.conf"
-  "/etc/hosts"
-  "/etc/resolv.conf"
+  /etc/hosts
+  /etc/resolv.conf
+  /etc/networks
+  /etc/protocols
+  /etc/services
+  /etc/rpc
   
   # TLS/SSL Certificates
-  "/etc/ssl/"
-  "/etc/pki/"
-  "/etc/ca-certificates/"
+  /etc/ssl/
+  /etc/pki/
+  /etc/ca-certificates/
   
-  # Dynamic Linker & Distro Info
-  "/etc/ld.so.conf"
-  "/etc/ld.so.conf.d/"
-  "/etc/ld.so.cache"
-  "/etc/os-release"
-  "/etc/localtime"
-  "/etc/alternatives/"
+  # Dynamic Linker
+  /etc/ld.so.conf
+  /etc/ld.so.conf.d/
+  /etc/ld.so.cache
+
+  # Other configuration
+  /etc/alternatives/
+  /etc/localtime
+  /etc/man_db.conf
+
+  # Static information
+  /etc/os-release
 )
 
 bwrap_args=(
