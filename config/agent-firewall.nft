@@ -7,7 +7,7 @@ table inet agent_sandbox_filter {
 
     set self6 {
         type ipv6_addr
-        elements = { fe80::2 }
+        elements = { fd00::2 }
     }
 
     set gateway4 {
@@ -17,7 +17,7 @@ table inet agent_sandbox_filter {
 
     set gateway6 {
         type ipv6_addr
-        elements = { fe80::1 }
+        elements = { fd00::1 }
     }
 
     chain output {
