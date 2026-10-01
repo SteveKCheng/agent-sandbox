@@ -23,33 +23,45 @@ Usage: $0 [OPTIONS] [--] [program args...]
 
 Positional arguments:
 
-  program                 Path to target program to run in the sandbox;
-                          If omitted, runs the log-in shell
-  args                    List of zero or more arguments to the target program
+  program                    Path to target program to run in the sandbox;
+                             If omitted, runs the log-in shell
+  args                       Zero or more arguments to the target program
 
 Options:
-  -d, --dry-run           Just show the "bwrap" command to execute, 
-                          and not actually create the sandbox or run the target program
-  -e, --etc-dir PATH      Set the path to the directory containing a template for /etc
-                          inside the sandbox
-  -f, --filter-file PATH  Firewall rules for the Linux kernel's "nftables" engine.
-                          This option may only be specified together with --tunnel-net.
-  -E, --env-file PATH     File with NAME=VALUE pairs for environment variables to set
-  -h, --host-name NAME    Override the name of the host in the sandbox
-  -S, --openssh           Adapt for OpenSSH's sshd, e.g. environment-variable settings
-  -N, --share-net         Share network with the host
-  -n, --tunnel-net        Sandbox tunnels network communications to host
 
-  -r, --root              Become root (UID=0) inside the sandbox
+ Users and environments:
 
-  --bwrap-path            Path to "bwrap" program used for sandboxing
-                          Defaults to the environment variable AGENT_BWRAP_PATH, 
-                          or if that is not defined, then "bwrap" as found on PATH
-  --pasta-path            Path to "pasta" program used for network tunnelling
-                          Defaults to the environment variable AGENT_PASTA_PATH, 
-                          or if that is not defined, then "pasta" as found on PATH
+  -E, --env-file PATH        File with NAME=VALUE settings for env. variables
+  -r, --root                 Become root (UID=0) inside the sandbox
+  -S, --openssh              Adapt for OpenSSH's sshd, e.g. env-variable settings
 
-  --help                Display this help text
+ Filesystem mounting:
+
+  -e, --etc-dir PATH         Point at a directory containing a template for 
+                             /etc inside the sandbox
+
+ Network:
+
+  -f, --filter-file PATH     Apply rules to the sandbox with the Linux 
+                             kernel's "nftables" (NetFilter).  This option may 
+                             only be specified together with --tunnel-net.
+  -h, --host-name NAME       Override the name of the host in the sandbox
+  -N, --share-net            Share network with the host
+  -n, --tunnel-net           Sandbox tunnels network communications to host
+
+ Sandbox construction:
+
+  -d, --dry-run              Just show the commands to execute, but not
+                             create the sandbox or run the target program
+
+  --bwrap-path               Path to "bwrap" program used for sandboxing
+                             Defaults to the env. variable AGENT_BWRAP_PATH
+                             if defined, else "bwrap" as found on PATH
+  --pasta-path               Path to "pasta" program used for network tunnelling.
+                             Defaults to the env. variable AGENT_PASTA_PATH, 
+                             if defined, else "pasta" as found on PATH
+
+  --help                     Display this help text
 
 EOF
     exit 0
@@ -357,8 +369,8 @@ etc_passwd_entries+=( "nobody:x:65534:65534:Unmapped User:/:/usr/sbin/nologin" )
 etc_group_entries+=( "nobody:x:65534:" )
 printf '%s\n' "${etc_passwd_entries[@]}" > "$tmp_dir/passwd"
 printf '%s\n' "${etc_group_entries[@]}" > "$tmp_dir/group"
-bwrap_args+=( --perms 400 --bind-data 138 /etc/passwd )
-bwrap_args+=( --perms 400 --bind-data 139 /etc/group )
+bwrap_args+=( --perms 400 --file 138 /etc/passwd )
+bwrap_args+=( --perms 400 --file 139 /etc/group )
 
 if [ "$tunnel_net" -eq 0 ] ; then
     if [ -n "$filter_file" ] ; then
