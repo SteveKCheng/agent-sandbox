@@ -47,4 +47,26 @@ table inet agent_sandbox_filter {
 
         reject
     }
+
+    chain input {
+        type filter hook input priority 0; policy accept;
+
+        ct state established,related accept
+
+        # Block all incoming connections.
+        #
+        # nft, as a packet filter, cannot block the sandbox from creating a listening socket, 
+        # but this rule makes any port completely unreachable from outside the sandbox.
+        #
+        # Note this rule does not prevent log-ins into a sshd running inside the sandbox,
+        # if sshd is set to run in inetd mode, with the host listening and accepting sockets
+        # on behalf of sshd.  If the sandbox is running an independently listening sshd
+        # then of course that port must be excepted here.
+        #
+        # If pasta is set to not do port forwarding into the sandbox, then the sandbox's
+        # ports cannot be reached in the first place, but still it is better to have the
+        # firewalling rules in one place rather than relying on pasta's configuration.
+        iifname "sandbox_tap" reject
+    }
+    
 }
