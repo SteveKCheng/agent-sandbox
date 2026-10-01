@@ -19,7 +19,13 @@ pasta_path="${AGENT_PASTA_PATH:-"$(which pasta 2>/dev/null || true)"}"
 
 usage() {
     cat <<EOF
-Usage: $0 [OPTIONS] [--] program args...
+Usage: $0 [OPTIONS] [--] [program args...]
+
+Positional arguments:
+
+  program                 Path to target program to run in the sandbox;
+                          If omitted, runs the log-in shell
+  args                    List of zero or more arguments to the target program
 
 Options:
   -d, --dry-run           Just show the "bwrap" command to execute, 
@@ -87,12 +93,6 @@ while true; do
             ;;
     esac
 done
-
-# Process remaining positional arguments (if any)
-if [ $# -eq 0 ]; then
-    echo >&2 "$0: program to run must be specified"
-    exit 1
-fi
 
 if (( share_net + tunnel_net > 1 )) ; then
     echo >&2 "$0: cannot specify both --share-net and --tunnel-net"
@@ -332,8 +332,12 @@ fi
 tmp_dir="$(mktemp -d -t "$(basename "$0")-XXXXXX")"
 trap 'rm -rf "$tmp_dir"' exit
 
-# Get log-in shell for the real target user
+# Get log-in shell for the real target user.
+# Default to executing that if no program was specified on the command line.
 login_shell="$(getent passwd "$target_uid" | cut -d: -f7)"
+if [ $# -eq 0 ]; then
+    set -- "$login_shell" "-l"
+fi
 
 # Generate /etc/passwd and /etc/group dynamically, based the target user/group
 etc_passwd_entries=()
