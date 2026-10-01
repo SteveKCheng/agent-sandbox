@@ -12,6 +12,7 @@ host_name=
 is_openssh=0
 share_net=0
 tunnel_net=0
+become_root=0
 
 bwrap_path="${AGENT_BWRAP_PATH:-"$(which bwrap 2>/dev/null || true)"}"
 pasta_path="${AGENT_PASTA_PATH:-"$(which pasta 2>/dev/null || true)"}"
@@ -33,6 +34,8 @@ Options:
   -N, --share-net         Share network with the host
   -n, --tunnel-net        Sandbox tunnels network communications to host
 
+  -r, --root              Become root (UID=0) inside the sandbox
+
   --bwrap-path            Path to "bwrap" program used for sandboxing
                           Defaults to the environment variable AGENT_BWRAP_PATH, 
                           or if that is not defined, then "bwrap" as found on PATH
@@ -49,8 +52,8 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-short_options="de:E:f:h:SNn"
-long_options="help,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,bwrap-path:,pasta-path:"
+short_options="de:E:f:h:SNnr"
+long_options="help,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -71,6 +74,7 @@ while true; do
         -S|--openssh)     is_openssh=1; shift;;
         -N|--share-net)   share_net=1; shift;;
         -n|--tunnel-net)  tunnel_net=1; shift;;
+        -r|--root)        become_root=1; shift;;
         --bwrap-path)     bwrap_path="$2"; shift 2;;
         --pasta-path)     pasta_path="$2"; shift 2;;
         --)
@@ -171,6 +175,32 @@ if [ -n "${host_name}" ] ; then
     bwrap_args+=( --hostname "${host_name}" )
 fi
 
+# We explicitly set bwrap to become the target *real* user & group, to make
+# the user/group ownership of mounted files in the home directory match (usually).
+#
+# Also, when running bwrap in pasta, pasta always becomes root in the user namespace
+# it creates, so we need to override it in bwrap to our desired UID/GID
+if [ "$become_root" -ne 0 ] ; then
+    target_uid=0
+    target_gid=0
+else
+    target_uid="$(id -ru)"
+    target_gid="$(id -rg)"
+fi
+bwrap_args+=( --uid $target_uid --gid $target_gid )
+
+# Get home directory for the real target user from the system user database.
+#
+# Since we are making a sandbox we do not want to propagate random enviroment variables
+# to the sandbox target, and that includes $HOME.  Also if the effective user is
+# different from the real user, $HOME may point to home of the effective user.
+# 
+# FIXME we need to parse environment variables first so we don't override the user's setting
+# on the command line
+real_home="$(getent passwd "$(id -ru)" | cut -d: -f6)"
+bwrap_args+=( --clearenv 
+              --setenv HOME "$real_home" )
+
 bwrap_args+=( 
   --proc /proc
   --dev /dev
@@ -197,7 +227,7 @@ bwrap_args+=(
   # Set up base home directory that is writable since many tools/apps depend on that.
   # Note that except for explicitly bind-mounted "work" directories, changes 
   # will not be persisted outside the sandbox.
-  --tmpfs "$HOME"
+  --tmpfs "$real_home"
 )
 
 
@@ -244,7 +274,6 @@ if [ -n "$etc_dir" ] ; then
     done
 fi
 
-bwrap_args+=( --clearenv )
 
 # Propagate TERM like ssh does
 bwrap_args+=( --setenv TERM "$TERM" )
@@ -281,10 +310,6 @@ fi
 
 
 
-# N.B. According to bwrap's documentation, the current directory in the sandbox is 
-#      the same as this process's current directory if it exists; otherwise it
-#      will be $HOME, which is the behavior we want.
-
 if [ "$dry_run" -ne 0 ] ; then
     echo "$bwrap_path" "${bwrap_args[@]}" -- "$@"
     exit 0
@@ -296,6 +321,41 @@ if [ ! -x "$bwrap_path" ] ; then
     exit 2
 fi
 
+# Prepare to write temporary files for data to pass to bwrap.
+#
+# When using pasta (for --tunnel-net), we cannot pass file descriptors to bwrap because 
+# pasta calls close_range(2) at start-up --- as a deliberate security measure to 
+# prevent leaks into containers, but breaks our use case.
+#
+# But even when not using pasta, we have multiple files we want to dynamically generate
+# into the sandbox, and it is easier to use a common code path.
+tmp_dir="$(mktemp -d -t "$(basename "$0")-XXXXXX")"
+trap 'rm -rf "$tmp_dir"' exit
+
+# Get log-in shell for the real target user
+login_shell="$(getent passwd "$target_uid" | cut -d: -f7)"
+
+# Generate /etc/passwd and /etc/group dynamically, based the target user/group
+etc_passwd_entries=()
+etc_group_entries=()
+if [ "$target_uid" -eq 0 ] ; then
+    etc_passwd_entries+=( "root:x:0:0:Super User:${real_home}:${login_shell}" )
+    etc_group_entries+=( "root:x:0:" )
+else
+    target_user_name="$(id -run)"
+    target_group_name="$(id -rgn)"
+    etc_passwd_entries+=( "root:x:0:0:Super User:/:/bin/sh"
+                          "${target_user_name}:x:${target_uid}:${target_gid}:Normal User:${real_home}:${login_shell}" )
+    etc_group_entries+=( "root:x:0:"
+                         "${target_group_name}:x:${target_gid}:" )
+fi
+etc_passwd_entries+=( "nobody:x:65534:65534:Unmapped User:/:/usr/sbin/nologin" )
+etc_group_entries+=( "nobody:x:65534:" )
+printf '%s\n' "${etc_passwd_entries[@]}" > "$tmp_dir/passwd"
+printf '%s\n' "${etc_group_entries[@]}" > "$tmp_dir/group"
+bwrap_args+=( --perms 400 --bind-data 138 /etc/passwd )
+bwrap_args+=( --perms 400 --bind-data 139 /etc/group )
+
 if [ "$tunnel_net" -eq 0 ] ; then
     if [ -n "$filter_file" ] ; then
         echo >&2 "$0: filter file can only be specified when tunnelling network"
@@ -305,8 +365,19 @@ if [ "$tunnel_net" -eq 0 ] ; then
     # Seal the root filesystem to be read-only after all modifications
     bwrap_args+=( --remount-ro / )
 
-    # Run bwrap with set-up arguments sent on FD 9
-    "$bwrap_path" --args 137 -- "$@" 137< <(printf '%s\0' "${bwrap_args[@]}") || exit $?
+    # Write arguments to temporary file
+    printf '%s\0' "${bwrap_args[@]}" > "$tmp_dir/bwrap_args"
+
+    # Exec bwrap in sub-shell so that: 
+    # (a) the name of this script still appears in the process tree
+    # (b) file descriptors are closed exactly when bwrap is finished with them
+    (
+        exec 137< "$tmp_dir/bwrap_args"
+        exec 138< "$tmp_dir/passwd"
+        exec 139< "$tmp_dir/group"
+        rm -f "$tmp_dir"/*
+        exec "$bwrap_path" --args 137 -- "$@" 
+    )
 
 else
 
@@ -349,15 +420,8 @@ else
     # bwrap will then proceed to create its own user namespace with the UID set to
     # non-zero (optionally).
     
-    # Need to specify UID and GID explicitly for bwrap because pasta creates a user
-    # namespace with UID=0 first
-    target_uid=$(id -u)
-    target_gid=$(id -g)
-
-    bwrap_args+=( --uid $target_uid --gid $target_gid )
-    
-    bwrap_args+=( --perms 400 --bind-data 138 /etc/resolv.conf )
-    bwrap_args+=( --perms 400 --bind-data 139 /etc/hosts )
+    bwrap_args+=( --perms 400 --bind-data 140 /etc/resolv.conf )
+    bwrap_args+=( --perms 400 --bind-data 141 /etc/hosts )
 
     if [ -z "${host_name}" ] ; then 
         host_name="$(/bin/hostname)"
@@ -370,15 +434,11 @@ else
         exit 2
     fi
 
-    bwrap_args+=( --remount-ro / )
+    # Must drop this capability if the target user in the sandbox is root,
+    # who would be able to manipulate firewall rules otherwise, defeating the security
+    bwrap_args+=( --cap-drop CAP_NET_ADMIN )
 
-    # Prepare to write temporary files for data to pass to bwrap.
-    #
-    # We cannot pass file descriptors to bwrap because pasta calls close_range(2) at start-up
-    # --- as a deliberate security measure to prevent leaks into containers, 
-    # but breaks our use case.
-    tmp_dir="$(mktemp -d -t "$(basename "$0")-XXXXXX")"
-    trap 'rm -rf "$tmp_dir"' exit
+    bwrap_args+=( --remount-ro / )
 
     # Write arguments to temporary file
     printf '%s\0' "${bwrap_args[@]}" > "$tmp_dir/bwrap_args"
@@ -414,10 +474,12 @@ EOF
 set -euo pipefail
 tmp_dir="$(dirname "$0")"
 exec 137< "$tmp_dir/bwrap_args"
-exec 138< "$tmp_dir/resolv.conf"
-exec 139< "$tmp_dir/hosts"
+exec 138< "$tmp_dir/passwd"
+exec 139< "$tmp_dir/group"
+exec 140< "$tmp_dir/resolv.conf"
+exec 141< "$tmp_dir/hosts"
 [[ ! -L "$tmp_dir/main.nft" ]] || nft -o -f "$tmp_dir/main.nft" 
-rm -f "$tmp_dir/bwrap_args" "$tmp_dir/resolv.conf" "$tmp_dir/hosts" "$tmp_dir/main.nft" "$0"
+rm -f "$tmp_dir"/*
 exec bwrap --args 137 -- "$@" 
 EOF
 
