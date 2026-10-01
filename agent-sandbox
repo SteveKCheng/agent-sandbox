@@ -445,7 +445,6 @@ else
 
     # Generate /etc/resolv.conf pointing to pasta's DNS forwarder
     cat > "$tmp_dir/resolv.conf" <<EOF
-nameserver fe80::1
 nameserver 169.254.0.1
 EOF
 
@@ -498,7 +497,7 @@ EOF
 
     "$pasta_path" \
         --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1 \
-        --address fd00::2/64 --gateway fd00::1 --dns-forward fd00::1 \
+        --address fd00::2/64 --gateway fd00::1 \
         --config-net --ns-ifname sandbox_tap --no-dhcp -- \
         /bin/bash "$tmp_dir/nft_then_bwrap.sh" "$@"
 

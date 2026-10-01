@@ -1,46 +1,19 @@
 table inet agent_sandbox_filter {
 
-    set self4 {
-        type ipv4_addr
-        elements = { 169.254.0.2 }
-    }
-
-    set self6 {
-        type ipv6_addr
-        elements = { fd00::2 }
-    }
-
-    set gateway4 {
-        type ipv4_addr
-        elements = { 169.254.0.1 }
-    }
-
-    set gateway6 {
-        type ipv6_addr
-        elements = { fd00::1 }
-    }
-
     chain output {
         type filter hook output priority 0
 
         # Allow internal loopback, for running local servers
         oif "lo" accept
 
-        # Allow talking to self
-        oif "sandbox_tap" ip  daddr @self4 accept
-        oif "sandbox_tap" ip6 daddr @self6 accept
-
         # Allow DNS queries to pasta's virtual gateway
-        oif "sandbox_tap" ip  daddr @gateway4 meta l4proto { tcp, udp } th dport 53 accept
-        oif "sandbox_tap" ip6 daddr @gateway6 meta l4proto { tcp, udp } th dport 53 accept
+        oif "sandbox_tap" meta l4proto { tcp, udp } th dport 53 accept
 
         # Allow connections ONLY to host's HTTP(S) filtering proxy
-        oif "sandbox_tap" ip  daddr @gateway4 tcp dport 8080 accept
-        oif "sandbox_tap" ip6 daddr @gateway6 tcp dport 8080 accept
+        oif "sandbox_tap" tcp dport 8080 accept
 
-        # Allow ICMP to gateway
-        oif "sandbox_tap" ip  daddr @gateway4 ip protocol icmp accept
-        oif "sandbox_tap" ip6 daddr @gateway6 meta l4proto ipv6-icmp accept
+        # Allow ICMP
+        oif "sandbox_tap" meta l4proto { icmp, ipv6-icmp } accept
 
         # Allow established/related incoming responses
         ct state established,related accept
@@ -51,6 +24,7 @@ table inet agent_sandbox_filter {
     chain input {
         type filter hook input priority 0; policy accept;
 
+        meta l4proto { icmp, ipv6-icmp } accept
         ct state established,related accept
 
         # Block all incoming connections.
