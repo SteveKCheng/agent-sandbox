@@ -125,8 +125,6 @@ config_whitelist=(
   "$HOME/.vimrc"
 
   # Networking
-  /etc/hosts
-  /etc/resolv.conf
   /etc/networks
   /etc/protocols
   /etc/services
@@ -153,32 +151,34 @@ config_whitelist=(
 
 bwrap_args=(
   --die-with-parent
-
-  --unshare-all
+  
+  --unshare-user-try 
+  --unshare-ipc 
+  --unshare-pid 
+  --unshare-cgroup-try
 )
 
 # Enable networking if requested.
 # (For "tunnelling", bwrap inherits not the host's network namespace 
 #  but the network namespace set up by pasta, below.)
 if [ "$share_net" -ne 0 ] ; then
-    bwrap_args+=( --share-net --share-uts )
-
-    # Use host's existing configuration for all machine names
-    #config_whitelist+=( "/etc/hosts" "/etc/resolv.conf" )
-
     # And therefore we must disallow overriding the sandbox's machine name,
     # because any new name would be inconsistent with the existing files above.
-    if [ -n "${host_name}" -ne 0 ] ; then
+    if [ -n "${host_name}" ] ; then
         echo >&2 "$0: cannot override host name of sandbox when sharing existing network"
         exit 1
     fi
+else
+    # Set host name for sandbox
+    bwrap_args+=( --unshare-uts )
+    if [ -n "${host_name}" ] ; then
+        bwrap_args+=( --hostname "${host_name}" )
+    fi
 
-elif [ "$tunnel_net" -ne 0 ] ; then
-    bwrap_args+=( --share-net )
-fi
-
-if [ -n "${host_name}" ] ; then
-    bwrap_args+=( --hostname "${host_name}" )
+    if [ "$tunnel_net" -eq 0 ] ; then
+        # Sandbox is to have no network: so unshare the network namespace
+        bwrap_args+=( --unshare-net )
+    fi
 fi
 
 # We explicitly set bwrap to become the target *real* user & group, to make
@@ -407,6 +407,21 @@ if [ "$tunnel_net" -eq 0 ] ; then
         exit 1
     fi
 
+    if [ "$share_net" -eq 0 ] ; then
+        # When the sandbox has no network connectivity, 
+        # generate /etc/hosts with only localhost in it
+        cat > "$tmp_dir/hosts" <<EOF
+127.0.0.1   localhost ${host_name}
+::1         localhost ${host_name}
+EOF
+        bwrap_args+=( --perms 400 --file 140 /etc/hosts )
+    else
+        # When the sandbox is sharing the host's network, 
+        # import the host's /etc/hosts and /etc/resolv.conf
+        bwrap_args+=( --ro-bind-try /etc/hosts /etc/hosts
+                      --ro-bind-try /etc/resolv.conf /etc/resolv.conf )
+    fi
+
     # Seal the root filesystem to be read-only after all modifications
     bwrap_args+=( --remount-ro / )
 
@@ -420,6 +435,7 @@ if [ "$tunnel_net" -eq 0 ] ; then
         exec 137< "$tmp_dir/bwrap_args"
         exec 138< "$tmp_dir/passwd"
         exec 139< "$tmp_dir/group"
+        if [ "$share_net" -eq 0 ] ; then exec 140< "$tmp_dir/hosts" ; fi
         rm -f "$tmp_dir"/*
         exec "$bwrap_path" --args 137 -- "$@" 
     )
@@ -465,8 +481,8 @@ else
     # bwrap will then proceed to create its own user namespace with the UID set to
     # non-zero (optionally).
     
-    bwrap_args+=( --perms 400 --bind-data 140 /etc/resolv.conf )
-    bwrap_args+=( --perms 400 --bind-data 141 /etc/hosts )
+    bwrap_args+=( --perms 400 --file 140 /etc/hosts )
+    bwrap_args+=( --perms 400 --file 141 /etc/resolv.conf )
 
     if [ -z "${host_name}" ] ; then 
         host_name="$(/bin/hostname)"
@@ -520,8 +536,8 @@ tmp_dir="$(dirname "$0")"
 exec 137< "$tmp_dir/bwrap_args"
 exec 138< "$tmp_dir/passwd"
 exec 139< "$tmp_dir/group"
-exec 140< "$tmp_dir/resolv.conf"
-exec 141< "$tmp_dir/hosts"
+exec 140< "$tmp_dir/hosts"
+exec 141< "$tmp_dir/resolv.conf"
 [[ ! -L "$tmp_dir/main.nft" ]] || nft -o -f "$tmp_dir/main.nft" 
 rm -f "$tmp_dir"/*
 exec bwrap --args 137 -- "$@" 
