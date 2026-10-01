@@ -13,6 +13,7 @@ is_openssh=0
 share_net=0
 tunnel_net=0
 become_root=0
+work_manifest_files=()
 
 bwrap_path="${AGENT_BWRAP_PATH:-"$(which bwrap 2>/dev/null || true)"}"
 pasta_path="${AGENT_PASTA_PATH:-"$(which pasta 2>/dev/null || true)"}"
@@ -39,6 +40,8 @@ Options:
 
   -e, --etc-dir PATH         Point at a directory containing a template for 
                              /etc inside the sandbox
+  -w, --work-manifest PATH   File listing "working directories/files" 
+                             that are to be mounted read/write
 
  Network:
 
@@ -70,8 +73,8 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-short_options="de:E:f:h:SNnr"
-long_options="help,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,bwrap-path:,pasta-path:"
+short_options="de:E:f:h:SNnrw:"
+long_options="help,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -92,6 +95,7 @@ while true; do
         -S|--openssh)     is_openssh=1; shift;;
         -N|--share-net)   share_net=1; shift;;
         -n|--tunnel-net)  tunnel_net=1; shift;;
+        -w|--work-manifest) work_manifest_files+=("$2"); shift 2;;
         -r|--root)        become_root=1; shift;;
         --bwrap-path)     bwrap_path="$2"; shift 2;;
         --pasta-path)     pasta_path="$2"; shift 2;;
@@ -111,15 +115,6 @@ if (( share_net + tunnel_net > 1 )) ; then
     exit 1
 fi
 
-# Work directories:
-#   These are mounted read-write.
-work_whitelist=(
-  "$HOME/.nuget/packages/"
-  "$HOME/dev/Mallard/"
-  "$HOME/dev/duckdb/"
-  "$HOME/.duckdb/"
-  "$HOME/.dotnet/"
-)
 
 # Config files:
 #   If there are symbolic links, the links will be resolved 
@@ -256,6 +251,32 @@ system_whitelist=(
     /opt
 )
 
+# Load plain text file consisting of lines into an array
+parse_manifest()
+{
+    manifest_file="$1"
+    manifest_rel_dir="$(dirname "$(realpath "$1")")"
+
+    # Output results into an array reference passed in by the caller
+    declare -n out_array="$2"
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Trim leading whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+    
+        # Skip empty lines and comment lines
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        
+        # If path is relative then make relative to that of manifest
+        if ! [[ "$line" =~ ^/ ]] ; then 
+            line="$manifest_rel_dir/$line"
+        fi
+        
+        out_array+=( "$line" )
+    
+    done < "$manifest_file"
+}
+
 for path in "${system_whitelist[@]}"; do
     if [ -L "$path" ] ; then
         link_target="$(readlink -n "$path")"
@@ -269,6 +290,13 @@ for path in "${config_whitelist[@]}"; do
     bwrap_args+=( --ro-bind-try "$path" "$path" )
 done
 
+declare -a work_whitelist
+for path in "${work_manifest_files[@]}" ; do
+    parse_manifest "$path" work_whitelist
+done
+
+# Work directories:
+#   These are mounted read-write.
 for path in "${work_whitelist[@]}"; do
     bwrap_args+=( --bind-try "$path" "$path" )
 done
@@ -289,6 +317,8 @@ fi
 
 # Propagate TERM like ssh does
 bwrap_args+=( --setenv TERM "$TERM" )
+
+
 
 if [ -n "${env_file}" ] ; then
 
