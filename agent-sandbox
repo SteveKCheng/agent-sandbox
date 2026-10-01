@@ -122,7 +122,6 @@ fi
 #   Mounted read-only.
 config_whitelist=(
   "$HOME/.gitconfig"
-  "$HOME/.nuget/NuGet/NuGet.Config"
   "$HOME/.vimrc"
 
   # Networking
