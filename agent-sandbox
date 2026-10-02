@@ -174,11 +174,6 @@ else
     if [ -n "${host_name}" ] ; then
         bwrap_args+=( --hostname "${host_name}" )
     fi
-
-    if [ "$tunnel_net" -eq 0 ] ; then
-        # Sandbox is to have no network: so unshare the network namespace
-        bwrap_args+=( --unshare-net )
-    fi
 fi
 
 # We explicitly set bwrap to become the target *real* user & group, to make
@@ -362,6 +357,13 @@ if [ ! -x "$bwrap_path" ] ; then
     exit 2
 fi
 
+if [ "$tunnel_net" -eq 0 ] ; then
+    if [ -n "$filter_file" ] ; then
+        echo >&2 "$0: filter file can only be specified when tunnelling network"
+        exit 1
+    fi
+fi
+
 # Prepare to write temporary files for data to pass to bwrap.
 #
 # When using pasta (for --tunnel-net), we cannot pass file descriptors to bwrap because 
@@ -401,46 +403,16 @@ printf '%s\n' "${etc_group_entries[@]}" > "$tmp_dir/group"
 bwrap_args+=( --perms 400 --file 138 /etc/passwd )
 bwrap_args+=( --perms 400 --file 139 /etc/group )
 
-if [ "$tunnel_net" -eq 0 ] ; then
-    if [ -n "$filter_file" ] ; then
-        echo >&2 "$0: filter file can only be specified when tunnelling network"
-        exit 1
-    fi
-
-    if [ "$share_net" -eq 0 ] ; then
-        # When the sandbox has no network connectivity, 
-        # generate /etc/hosts with only localhost in it
-        cat > "$tmp_dir/hosts" <<EOF
-127.0.0.1   localhost ${host_name}
-::1         localhost ${host_name}
-EOF
-        bwrap_args+=( --perms 400 --file 140 /etc/hosts )
-    else
-        # When the sandbox is sharing the host's network, 
-        # import the host's /etc/hosts and /etc/resolv.conf
-        bwrap_args+=( --ro-bind-try /etc/hosts /etc/hosts
-                      --ro-bind-try /etc/resolv.conf /etc/resolv.conf )
-    fi
-
+commit_bwrap_args()
+{
     # Seal the root filesystem to be read-only after all modifications
     bwrap_args+=( --remount-ro / )
 
     # Write arguments to temporary file
     printf '%s\0' "${bwrap_args[@]}" > "$tmp_dir/bwrap_args"
+}
 
-    # Exec bwrap in sub-shell so that: 
-    # (a) the name of this script still appears in the process tree
-    # (b) file descriptors are closed exactly when bwrap is finished with them
-    (
-        exec 137< "$tmp_dir/bwrap_args"
-        exec 138< "$tmp_dir/passwd"
-        exec 139< "$tmp_dir/group"
-        if [ "$share_net" -eq 0 ] ; then exec 140< "$tmp_dir/hosts" ; fi
-        rm -f "$tmp_dir"/*
-        exec "$bwrap_path" --args 137 -- "$@" 
-    )
-
-else
+if [ "$tunnel_net" -ne 0 ] ; then
 
     # Check for existence of pasta
     if [ ! -x "$pasta_path" ] ; then
@@ -499,11 +471,6 @@ else
     # who would be able to manipulate firewall rules otherwise, defeating the security
     bwrap_args+=( --cap-drop CAP_NET_ADMIN )
 
-    bwrap_args+=( --remount-ro / )
-
-    # Write arguments to temporary file
-    printf '%s\0' "${bwrap_args[@]}" > "$tmp_dir/bwrap_args"
-
     # Generate /etc/resolv.conf pointing to pasta's DNS forwarder
     cat > "$tmp_dir/resolv.conf" <<EOF
 nameserver 169.254.0.1
@@ -529,7 +496,7 @@ EOF
     # become so cluttered.  And we prefer this script to be self-contained
     # rather than relying on the user to pleace the helper script beside
     # this shell script.
-    cat > "$tmp_dir/nft_then_bwrap.sh" <<"EOF"
+    cat > "$tmp_dir/config-net-then-bwrap.sh" <<"EOF"
 #!/bin/bash
 set -euo pipefail
 tmp_dir="$(dirname "$0")"
@@ -556,11 +523,73 @@ EOF
         ln -s "$(realpath "$filter_file")" "$tmp_dir/main.nft" 
     fi
 
+    commit_bwrap_args
+
     "$pasta_path" \
         --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1 \
         --address fd00::2/64 --gateway fd00::1 \
         --config-net --ns-ifname sandbox_tap --no-dhcp -- \
-        /bin/bash "$tmp_dir/nft_then_bwrap.sh" "$@"
+        /bin/bash "$tmp_dir/config-net-then-bwrap.sh" "$@"
+
+elif [ "$share_net" -ne 0 ] ; then
+
+    # When the sandbox is sharing the host's network, 
+    # import the host's /etc/hosts and /etc/resolv.conf
+    bwrap_args+=( --ro-bind-try /etc/hosts /etc/hosts
+                  --ro-bind-try /etc/resolv.conf /etc/resolv.conf )
+
+    commit_bwrap_args
+
+    # Exec bwrap in sub-shell so that: 
+    # (a) the name of this script still appears in the process tree
+    # (b) file descriptors are closed exactly when bwrap is finished with them
+    (
+        exec 137< "$tmp_dir/bwrap_args"
+        exec 138< "$tmp_dir/passwd"
+        exec 139< "$tmp_dir/group"
+        rm -f "$tmp_dir"/*
+        exec "$bwrap_path" --args 137 -- "$@" 
+    )
+
+else
+
+    # When the sandbox has no network connectivity, 
+    # generate /etc/hosts with only localhost in it
+        cat > "$tmp_dir/hosts" <<EOF
+127.0.0.1   localhost ${host_name}
+::1         localhost ${host_name}
+EOF
+    bwrap_args+=( --perms 400 --file 140 /etc/hosts )
+
+    commit_bwrap_args
+
+    # If bwrap is asked to "unshare" the network namespace, it does no set-up
+    # whatsoever and that means the loopback interface is not even up.
+    # Also, unprivileged pinging is not allowed.  That is not good if the 
+    # sandboxed program wants to bring up local testing servers.  
+    #
+    # We cannot set up the network once inside bwrap, because
+    # we do not have the privileges to do so if UID != 0.
+    #
+    # We must do the set up *outside* bwrap and then let it inherit the
+    # newly set-up network namespace, just like what happens when we 
+    # use "pasta" to implement --tunnel-net, above.
+
+    cat > "$tmp_dir/config-net-then-bwrap.sh" <<"EOF"
+#!/bin/bash
+set -euo pipefail
+tmp_dir="$(dirname "$0")"
+exec 137< "$tmp_dir/bwrap_args"
+exec 138< "$tmp_dir/passwd"
+exec 139< "$tmp_dir/group"
+exec 140< "$tmp_dir/hosts"
+rm -f "$tmp_dir"/*
+ip link set lo up
+sysctl -q -w net.ipv4.ping_group_range="0 0"
+exec bwrap --args 137 -- "$@" 
+EOF
+
+    unshare -U -r -n /bin/bash "$tmp_dir/config-net-then-bwrap.sh" "$@"
 
 fi
 
