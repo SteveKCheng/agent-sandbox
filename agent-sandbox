@@ -152,7 +152,7 @@ config_whitelist=(
 bwrap_args=(
   --die-with-parent
   
-  --unshare-user-try 
+  --unshare-user 
   --unshare-ipc 
   --unshare-pid 
   --unshare-cgroup-try
