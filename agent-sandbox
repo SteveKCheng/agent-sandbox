@@ -21,18 +21,19 @@ if [ "$stage2" = "--config-tunnel-net" ] || \
     exec 137< "$tmp_dir/bwrap_args"
     exec 138< "$tmp_dir/passwd"
     exec 139< "$tmp_dir/group"
+    exec 140< "$tmp_dir/machine-id"
 
     if [ "$stage2" = "--config-tunnel-net" ] ; then
 
-        exec 140< "$tmp_dir/hosts"
-        exec 141< "$tmp_dir/resolv.conf"
+        exec 141< "$tmp_dir/hosts"
+        exec 142< "$tmp_dir/resolv.conf"
 
         # Apply nft rules passed in by the user, if any
         [[ ! -L "$tmp_dir/main.nft" ]] || nft -o -f "$tmp_dir/main.nft" 
 
     elif [ "$stage2" = "--config-isolate-net" ] ; then
 
-        exec 140< "$tmp_dir/hosts"
+        exec 141< "$tmp_dir/hosts"
 
         # Activate loopback interface and enable unprivileged ping
         ip link set lo up
@@ -446,8 +447,12 @@ etc_passwd_entries+=( "nobody:x:65534:65534:Unmapped User:/:/usr/sbin/nologin" )
 etc_group_entries+=( "nobody:x:65534:" )
 printf '%s\n' "${etc_passwd_entries[@]}" > "$tmp_dir/passwd"
 printf '%s\n' "${etc_group_entries[@]}" > "$tmp_dir/group"
-bwrap_args+=( --perms 400 --file 138 /etc/passwd )
-bwrap_args+=( --perms 400 --file 139 /etc/group )
+bwrap_args+=( --perms 444 --file 138 /etc/passwd )
+bwrap_args+=( --perms 444 --file 139 /etc/group )
+
+# Generate /etc/machine-id
+tr -d '-' < /proc/sys/kernel/random/uuid > "$tmp_dir/machine-id"
+bwrap_args+=( --perms 444 --file 140 /etc/machine-id )
 
 commit_bwrap_args()
 {
@@ -514,8 +519,8 @@ fd00::2     ${host_name}
 fd00::1     gateway
 EOF
 
-    bwrap_args+=( --perms 400 --file 140 /etc/hosts )
-    bwrap_args+=( --perms 400 --file 141 /etc/resolv.conf )
+    bwrap_args+=( --perms 444 --file 141 /etc/hosts )
+    bwrap_args+=( --perms 444 --file 142 /etc/resolv.conf )
     commit_bwrap_args
 
     # Launch bwrap wrapped in pasta.
@@ -580,7 +585,7 @@ else
 ::1         localhost ${host_name}
 EOF
 
-    bwrap_args+=( --perms 400 --file 140 /etc/hosts )
+    bwrap_args+=( --perms 444 --file 141 /etc/hosts )
     commit_bwrap_args
 
     # If bwrap is asked to "unshare" the network namespace, it does no set-up
