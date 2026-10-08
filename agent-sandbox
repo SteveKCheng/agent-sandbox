@@ -59,6 +59,8 @@ host_name=
 is_openssh=0
 share_net=0
 tunnel_net=0
+tcp_ports=
+udp_ports=
 become_root=0
 work_manifest_files=()
 
@@ -99,6 +101,13 @@ Options:
   -N, --share-net            Share network with the host
   -n, --tunnel-net           Sandbox tunnels network communications to host
 
+  --tcp-ports SPEC           TCP ports from host to forward into sandbox.
+                             SPEC is as described in pasta's manual page.
+                             Default is "none": no ports forwarded.
+  --udp-ports SPEC           UDP ports from host to forward into sandbox.
+                             SPEC is as described in pasta's manual page.
+                             Default is "none": no ports forwarded.
+
  Sandbox construction:
 
   -d, --dry-run              Just show the commands to execute, but not
@@ -112,6 +121,7 @@ Options:
                              if defined, else "pasta" as found on PATH
 
   --help                     Display this help text
+  --version                  Display version of this software
 
 EOF
     exit 0
@@ -121,7 +131,7 @@ EOF
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
 short_options="de:E:f:h:SNnrw:"
-long_options="help,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,bwrap-path:,pasta-path:"
+long_options="help,version,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,tcp-ports:,udp-ports:,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -134,6 +144,7 @@ eval set -- "$parsed"
 while true; do
     case "$1" in
         --help)          usage;;
+        --version)       echo "Version 1.0.0"; exit 0;;
         -e|--etc-dir)     etc_dir="$2"; shift 2;;
         -d|--dry-run)     dry_run=1; shift;;
         -E|--env-file)    env_file="$2"; shift 2;;
@@ -144,6 +155,8 @@ while true; do
         -n|--tunnel-net)  tunnel_net=1; shift;;
         -w|--work-manifest) work_manifest_files+=("$2"); shift 2;;
         -r|--root)        become_root=1; shift;;
+        --tcp-ports)      tcp_ports="$2"; shift 2;;
+        --udp-ports)      udp_ports="$2"; shift 2;;
         --bwrap-path)     bwrap_path="$2"; shift 2;;
         --pasta-path)     pasta_path="$2"; shift 2;;
         --)
@@ -406,7 +419,15 @@ fi
 
 if [ "$tunnel_net" -eq 0 ] ; then
     if [ -n "$filter_file" ] ; then
-        echo >&2 "$0: filter file can only be specified when tunnelling network"
+        echo >&2 "$0: --filter-file can only be specified when tunnelling network"
+        exit 1
+    fi
+    if [ -n "$tcp_ports" ] ; then 
+        echo >&2 "$0: --tcp-ports can only be specified when tunnelling network"
+        exit 1
+    fi
+    if [ -n "$udp_ports" ] ; then 
+        echo >&2 "$0: --udp-ports can only be specified when tunnelling network"
         exit 1
     fi
 fi
@@ -558,6 +579,7 @@ EOF
     "$pasta_path" \
         --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1 \
         --address fd00::2/64 --gateway fd00::1 \
+        --tcp-ns "${tcp_ports:-none}" --udp-ns "${udp_ports:-none}" \
         --config-net --ns-ifname sandbox_tap --no-dhcp -- \
         /bin/bash "$0" --config-tunnel-net "$tmp_dir" \
             "$bwrap_path" --args 137 "$@"
