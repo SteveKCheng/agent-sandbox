@@ -18,7 +18,7 @@ Your home directory's files, after filtering, are mounted inside the sandbox at 
 ## Dependencies
 
   - [Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap` command): constructs the namespaces for the sandbox
-  - [Passt](https://passt.top/passt/) (`pasta` command): Layer-4 tunnelling to enable filtered network access
+  - [Passt](https://passt.top/passt/about/) (`pasta` command): Layer-4 tunnelling to enable filtered network access
   - [GNU Bash](https://www.gnu.org/software/bash/): shell
   - [nftables](https://wiki.nftables.org/): kernel-level firewalling
 
