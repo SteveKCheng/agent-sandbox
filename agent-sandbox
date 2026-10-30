@@ -63,6 +63,8 @@ tcp_ports=
 udp_ports=
 become_root=0
 work_manifest_files=()
+extra_ro_binds=()
+extra_env_args=()
 
 bwrap_path="${AGENT_BWRAP_PATH:-"$(which bwrap 2>/dev/null || true)"}"
 pasta_path="${AGENT_PASTA_PATH:-"$(which pasta 2>/dev/null || true)"}"
@@ -85,12 +87,15 @@ Options:
   -r, --root                 Become root (UID=0) inside the sandbox
   -S, --openssh              Adapt for OpenSSH's sshd, e.g. env-variable settings
 
+  --env NAME=VALUE           Set another env. variable with NAME=VALUE
+
  Filesystem mounting:
 
   -e, --etc-dir PATH         Point at a directory containing a template for 
                              /etc inside the sandbox
   -w, --work-manifest PATH   File listing "working directories/files" 
                              that are to be mounted read/write
+  --ro-bind PATH             Bind-mount specified path on the sandbox
 
  Network:
 
@@ -131,7 +136,7 @@ EOF
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
 short_options="de:E:f:h:SNnrw:"
-long_options="help,version,dry-run,etc-dir:,env-file:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,tcp-ports:,udp-ports:,bwrap-path:,pasta-path:"
+long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,ro-bind:,rw-bind:,tcp-ports:,udp-ports:,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -155,6 +160,33 @@ while true; do
         -n|--tunnel-net)  tunnel_net=1; shift;;
         -w|--work-manifest) work_manifest_files+=("$2"); shift 2;;
         -r|--root)        become_root=1; shift;;
+
+        --env)            
+            if [[ "$2" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+                key="${BASH_REMATCH[1]}"
+                val="${BASH_REMATCH[2]}"
+                extra_env_args+=( --setenv "$key" "$val" )
+            else
+                echo >&2 "$0: invalid format for environment setting: $2"
+                exit 1
+            fi
+            shift 2;;
+
+        --ro-bind|--rw-bind)
+            if [[ "$2" =~ ^(([^=]+)=)?(.+)$ ]]; then
+                val="${BASH_REMATCH[3]}"
+                key="${BASH_REMATCH[2]:-"$val"}"
+                if [ "$1" = "--ro-bind" ] ; then
+                    extra_bind_args+=( --ro-bind "$key" "$val" );
+                else
+                    extra_bind_args+=( --bind "$key" "$val" );
+                fi
+            else
+                echo >&2 "$0: invalid format for bind-mount path: $2"
+                exit 1
+            fi
+            shift 2;;
+
         --tcp-ports)      tcp_ports="$2"; shift 2;;
         --udp-ports)      udp_ports="$2"; shift 2;;
         --bwrap-path)     bwrap_path="$2"; shift 2;;
@@ -368,11 +400,10 @@ if [ -n "$etc_dir" ] ; then
     done
 fi
 
+bwrap_args+=( "${extra_bind_args[@]}" )
 
 # Propagate TERM like ssh does
 bwrap_args+=( --setenv TERM "$TERM" )
-
-
 
 if [ -n "${env_file}" ] ; then
 
@@ -404,7 +435,7 @@ if [ -n "${env_file}" ] ; then
     fi
 fi
 
-
+bwrap_args+=( "${extra_env_args[@]}" )
 
 if [ "$dry_run" -ne 0 ] ; then
     echo "$bwrap_path" "${bwrap_args[@]}" -- "$@"
