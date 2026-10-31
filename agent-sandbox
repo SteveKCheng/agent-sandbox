@@ -63,6 +63,8 @@ host_tcp_ports=
 host_udp_ports=
 guest_tcp_ports=
 guest_udp_ports=
+no_tap=0
+inbound_tap=0
 become_root=0
 work_manifest_files=()
 extra_ro_binds=()
@@ -108,18 +110,38 @@ Options:
   -N, --share-net            Share network with the host
   -n, --tunnel-net           Sandbox tunnels network communications to host
 
+ Network tunnelling:
+
   --host-tcp-ports SPEC      TCP listeners from host to forward into the sandbox.
                              SPEC specifies ports, as described in pasta's manual.
                              Default is "none": no ports forwarded.
+
   --host-udp-ports SPEC      UDP listeners from host to forward into the sandbox.
                              SPEC specifies ports, as described in pasta's manual.
                              Default is "none": no ports forwarded.
+
   --guest-tcp-ports SPEC     TCP listeners from sandbox to forward to the host.
                              SPEC specifies ports, as described in pasta's manual.
                              Default is "none": no ports forwarded.
+
   --guest-udp-ports SPEC     UDP listeners from host to forward into sandbox.
                              SPEC specifies ports, as described in pasta's manual.
                              Default is "none": no ports forwarded.
+
+  --no-tap                   Do not create TAP device in the sandbox when tunnelling 
+                             the network; pasta will only forward traffic between the 
+                             host and the guest's loopback interfaces.  The sandbox
+                             will not be able to make outbound connections except
+                             those explicitly forwarded using --host-tcp-ports
+                             or --host-udp-ports.
+
+  --inbound-tap              Connections forwarded from the host into the sandbox are
+                             delivered through the TAP device instead of splicing
+                             the socket's data, and appearing to the sandbox as 
+                             coming from the loopback interface.  Thus, net filters, 
+                             queue disciplines, etc. set on the TAP device are 
+                             respected for inbound connections.  This option is
+                             incompatible with --no-tap.
 
  Sandbox construction:
 
@@ -144,7 +166,7 @@ EOF
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
 short_options="de:E:f:h:SNnrw:"
-long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,ro-bind:,rw-bind:,host-tcp-ports:,host-udp-ports:,guest-tcp-ports:,guest-udp-ports:,bwrap-path:,pasta-path:"
+long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,ro-bind:,rw-bind:,host-tcp-ports:,host-udp-ports:,guest-tcp-ports:,guest-udp-ports:,no-tap,inbound-tap,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -168,6 +190,9 @@ while true; do
         -n|--tunnel-net)  tunnel_net=1; shift;;
         -w|--work-manifest) work_manifest_files+=("$2"); shift 2;;
         -r|--root)        become_root=1; shift;;
+
+        --no-tap)         no_tap=1; shift;;
+        --inbound-tap)    inbound_tap=1; shift;;
 
         --env)            
             if [[ "$2" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
@@ -472,6 +497,14 @@ if [ "$tunnel_net" -eq 0 ] ; then
         echo >&2 "$0: --guest-tcp-ports, --guest-udp-ports can only be specified when tunnelling network"
         exit 1
     fi
+    if [ "$no_tap" -ne 0 ] || [ "$inbound_tap" -ne 0 ] ; then
+        echo >&2 "0: --no-tap, --inbound-tap can only be specified when tunnelling network"
+        exit 1
+    fi
+    if (( no_tap + inbound_tap > 1 )) ; then
+        echo >&2 "$0: cannot specify both --no-tap and --inbound-tap"
+        exit 1
+    fi
 fi
 
 # Prepare to write temporary files for data to pass to bwrap.
@@ -526,6 +559,16 @@ commit_bwrap_args()
     printf '%s\0' "${bwrap_args[@]}" > "$tmp_dir/bwrap_args"
 }
 
+# When the sandbox has no direct network connectivity, 
+# generate /etc/hosts with only localhost in it
+generate_etc_hosts_for_local_only()
+{
+    cat > "$tmp_dir/hosts" <<EOF
+127.0.0.1   localhost ${host_name}
+::1         localhost ${host_name}
+EOF
+}
+
 if [ "$tunnel_net" -ne 0 ] ; then
 
     # Check for existence of pasta
@@ -567,13 +610,16 @@ if [ "$tunnel_net" -ne 0 ] ; then
 nameserver 169.254.0.1
 EOF
 
-    # Generate /etc/hosts containing the host name that was set.
-    # It must be consistent with pasta's setting of IP addresses, below.
-    #
-    # For IPv4 we use a link-local address.
-    # For IPv6, link-local addresses may require scope/interface IDs in some
-    # instances; we avoid the complication by using a Unique Local Address instead.
-    cat > "$tmp_dir/hosts" <<EOF
+    bwrap_args+=( --perms 444 --file 141 /etc/hosts )
+
+    if [ "$no_tap" eq 0 ] ; then
+        # Generate /etc/hosts containing the host name that was set.
+        # It must be consistent with pasta's setting of IP addresses, below.
+        #
+        # For IPv4 we use a link-local address.
+        # For IPv6, link-local addresses may require scope/interface IDs in some
+        # instances; we avoid the complication by using a Unique Local Address instead.
+        cat > "$tmp_dir/hosts" <<EOF
 127.0.0.1   localhost
 ::1         localhost 
 169.254.0.2 ${host_name}
@@ -581,10 +627,37 @@ fd00::2     ${host_name}
 169.254.0.1 gateway
 fd00::1     gateway
 EOF
+        bwrap_args+=( --perms 444 --file 142 /etc/resolv.conf )
+    else
+        generate_etc_hosts_for_local_only
+    fi
 
-    bwrap_args+=( --perms 444 --file 141 /etc/hosts )
-    bwrap_args+=( --perms 444 --file 142 /etc/resolv.conf )
     commit_bwrap_args
+
+    pasta_args=( --config-net )
+    
+    if [ "$no_tap" -ne 0 ] ; then
+        pasta_args+=( --splice-only )
+    else
+        pasta_args+=( 
+            --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1
+            --address fd00::2/64 --gateway fd00::1
+            --ns-ifname sandbox_tap
+            --no-dhcp
+        )
+    fi
+
+    if [ "$inbound_tap" -ne 0 ] ; then 
+        pasta_args+=( --no-splice )
+    else
+        pasta_args+=( --host-lo-to-ns-lo )
+    fi
+
+    # Pasta's port forwarding
+    pasta_args+=(
+        --tcp-ports "${guest_tcp_ports:-none}" --udp-ports "${guest_udp_ports:-none}"
+        --tcp-ns "${host_tcp_ports:-none}" --udp-ns "${host_udp_ports:-none}"
+    )
 
     # Launch bwrap wrapped in pasta.
     # pasta creates the network namespace that does Layer-4 tunnelling.
@@ -618,13 +691,7 @@ EOF
     #
     # bwrap will then proceed to create its own user namespace with the UID set to
     # non-zero (optionally).
-    "$pasta_path" \
-        --address 169.254.0.2/16 --gateway 169.254.0.1 --dns-forward 169.254.0.1 \
-        --address fd00::2/64 --gateway fd00::1 \
-        --host-lo-to-ns-lo \
-        --tcp-ports "${guest_tcp_ports:-none}" --udp-ports "${guest_udp_ports:-none}" \
-        --tcp-ns "${host_tcp_ports:-none}" --udp-ns "${host_udp_ports:-none}" \
-        --config-net --ns-ifname sandbox_tap --no-dhcp -- \
+    "$pasta_path" "${pasta_args[@]}" -- \
         /bin/bash "$0" --config-tunnel-net "$tmp_dir" \
             "$bwrap_path" --args 137 "$@"
 
@@ -644,12 +711,7 @@ elif [ "$share_net" -ne 0 ] ; then
 
 else
 
-    # When the sandbox has no network connectivity, 
-    # generate /etc/hosts with only localhost in it
-    cat > "$tmp_dir/hosts" <<EOF
-127.0.0.1   localhost ${host_name}
-::1         localhost ${host_name}
-EOF
+    generate_etc_hosts_for_local_only
 
     bwrap_args+=( --perms 444 --file 141 /etc/hosts )
     commit_bwrap_args
