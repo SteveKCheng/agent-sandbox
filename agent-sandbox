@@ -59,6 +59,7 @@ host_name=
 is_openssh=0
 share_net=0
 tunnel_net=0
+forward_net=0
 port_forward_args=()
 has_host_tcp_ports=0
 has_host_udp_ports=0
@@ -73,6 +74,7 @@ extra_env_args=()
 
 bwrap_path="${AGENT_BWRAP_PATH:-"$(which bwrap 2>/dev/null || true)"}"
 pasta_path="${AGENT_PASTA_PATH:-"$(which pasta 2>/dev/null || true)"}"
+specchio_path="${AGENT_SPECCHIO_PATH:-"$(which specchio 2>/dev/null || true)"}"
 
 usage() {
     cat <<EOF
@@ -109,7 +111,10 @@ Options:
                              only be specified together with --tunnel-net.
   -h, --host-name NAME       Override the name of the host in the sandbox
   -N, --share-net            Share network with the host
-  -n, --tunnel-net           Sandbox tunnels network communications to host
+  -n, --tunnel-net           Sandbox tunnels network communications to host,
+                             using "pasta"
+  -F, --forward-net          Sandbox has loopback network with port forwarding,
+                             using "specchio"
 
  Network tunnelling:
 
@@ -155,6 +160,9 @@ Options:
   --pasta-path               Path to "pasta" program used for network tunnelling.
                              Defaults to the env. variable AGENT_PASTA_PATH, 
                              if defined, else "pasta" as found on PATH
+  --specchio-path            Path to "specchio" program used for port forwarding.
+                             Defaults to the env. variable AGENT_SPECCHIO_PATH, 
+                             if defined, else "specchio" as found on PATH
 
   --help                     Display this help text
   --version                  Display version of this software
@@ -166,8 +174,8 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-short_options="de:E:f:h:SNnrw:"
-long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,ro-bind:,rw-bind:,host-tcp-ports:,host-udp-ports:,guest-tcp-ports:,guest-udp-ports:,no-tap,inbound-tap,bwrap-path:,pasta-path:"
+short_options="de:E:f:h:SNnFrw:"
+long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,forward-net,root,work-manifest:,ro-bind:,rw-bind:,host-tcp-ports:,host-udp-ports:,guest-tcp-ports:,guest-udp-ports:,no-tap,inbound-tap,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -189,6 +197,7 @@ while true; do
         -S|--openssh)     is_openssh=1; shift;;
         -N|--share-net)   share_net=1; shift;;
         -n|--tunnel-net)  tunnel_net=1; shift;;
+        -F|--forward-net) forward_net=1; shift;;
         -w|--work-manifest) work_manifest_files+=("$2"); shift 2;;
         -r|--root)        become_root=1; shift;;
 
@@ -228,6 +237,8 @@ while true; do
 
         --bwrap-path)     bwrap_path="$2"; shift 2;;
         --pasta-path)     pasta_path="$2"; shift 2;;
+        --specchio-path)  speechio_path="$2"; shift 2;;
+
         --)
             shift
             break
@@ -239,8 +250,8 @@ while true; do
     esac
 done
 
-if (( share_net + tunnel_net > 1 )) ; then
-    echo >&2 "$0: cannot specify both --share-net and --tunnel-net"
+if (( share_net + tunnel_net + forward_net > 1 )) ; then
+    echo >&2 "$0: at most one of --share-net, --tunnel-net, --forward-net can be specified"
     exit 1
 fi
 
@@ -491,10 +502,6 @@ if [ "$tunnel_net" -eq 0 ] ; then
         exit 1
     fi
 
-    if [ ${#port_forward_args[@]} -ne 0 ] ; then
-        echo >&2 "$0: options for port forwarding can only be specified when tunnelling network"
-        exit 1
-    fi
     if [ "$no_tap" -ne 0 ] || [ "$inbound_tap" -ne 0 ] ; then
         echo >&2 "0: --no-tap, --inbound-tap can only be specified when tunnelling network"
         exit 1
@@ -503,6 +510,11 @@ if [ "$tunnel_net" -eq 0 ] ; then
         echo >&2 "$0: cannot specify both --no-tap and --inbound-tap"
         exit 1
     fi
+fi
+
+if [ "$tunnel_net" -eq 0 ] && [ "$forward_net" -eq 0 ] && [ ${#port_forward_args[@]} -ne 0 ] ; then
+    echo >&2 "$0: options for port forwarding can only be specified when tunnelling network"
+    exit 1
 fi
 
 # Prepare to write temporary files for data to pass to bwrap.
@@ -567,6 +579,7 @@ generate_etc_hosts_for_local_only()
 EOF
 }
 
+# Use pasta to set up network tunnelling
 if [ "$tunnel_net" -ne 0 ] ; then
 
     # Check for existence of pasta
@@ -694,6 +707,31 @@ EOF
     # non-zero (optionally).
     "$pasta_path" "${pasta_args[@]}" -- \
         /bin/bash "$0" --config-tunnel-net "$tmp_dir" \
+            "$bwrap_path" --args 137 "$@"
+
+# Use specchio to set up port forwarding.  
+# It looks very much like the code path for pasta, but much simplified.
+elif [ "$forward_net" -ne 0 ] ; then
+
+    # Check for existence of specchio
+    if [ ! -x "$specchio_path" ] ; then
+        echo >&2 "$0: the specchio program is required for --forward-net but could not be found"
+        exit 2
+    fi
+
+    if [ -z "${host_name}" ] ; then 
+        host_name="$(/bin/hostname)"
+        host_name="${host_name:-agent-sandbox}"
+        bwrap_args+=( --hostname ${host_name} )
+    fi
+
+    generate_etc_hosts_for_local_only
+    bwrap_args+=( --perms 444 --file 141 /etc/hosts )
+
+    commit_bwrap_args
+
+    "$specchio_path" "${port_forward_args[@]}" -- \
+        /bin/bash "$0" --config-isolate-net "$tmp_dir" \
             "$bwrap_path" --args 137 "$@"
 
 elif [ "$share_net" -ne 0 ] ; then
