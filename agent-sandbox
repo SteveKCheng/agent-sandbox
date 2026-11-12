@@ -59,10 +59,11 @@ host_name=
 is_openssh=0
 share_net=0
 tunnel_net=0
-host_tcp_ports=
-host_udp_ports=
-guest_tcp_ports=
-guest_udp_ports=
+port_forward_args=()
+has_host_tcp_ports=0
+has_host_udp_ports=0
+has_guest_tcp_ports=0
+has_guest_udp_ports=0
 no_tap=0
 inbound_tap=0
 become_root=0
@@ -220,10 +221,10 @@ while true; do
             fi
             shift 2;;
 
-        --host-tcp-ports) host_tcp_ports="$2"; shift 2;;
-        --host-udp-ports) host_udp_ports="$2"; shift 2;;
-        --guest-tcp-ports) guest_tcp_ports="$2"; shift 2;;
-        --guest-udp-ports) guest_udp_ports="$2"; shift 2;;
+        --host-tcp-ports) port_forward_args+=(--tcp-ns "$2"); has_host_tcp_ports=1; shift 2;;
+        --host-udp-ports) port_forward_args+=(--udp-ns "$2"); has_host_udp_ports=1; shift 2;;
+        --guest-tcp-ports) port_forward_args+=(--tcp-ports "$2"); has_guest_tcp_ports=1; shift 2;;
+        --guest-udp-ports) port_forward_args+=(--udp-ports "$2"); has_guest_udp_ports=1; shift 2;;
 
         --bwrap-path)     bwrap_path="$2"; shift 2;;
         --pasta-path)     pasta_path="$2"; shift 2;;
@@ -489,12 +490,9 @@ if [ "$tunnel_net" -eq 0 ] ; then
         echo >&2 "$0: --filter-file can only be specified when tunnelling network"
         exit 1
     fi
-    if [ -n "$host_tcp_ports" ] || [ -n "$host_udp_ports" ] ; then 
-        echo >&2 "$0: --host-tcp-ports, --host-udp-ports can only be specified when tunnelling network"
-        exit 1
-    fi
-    if [ -n "$guest_tcp_ports" ] || [ -n "$guest_udp_ports" ] ; then 
-        echo >&2 "$0: --guest-tcp-ports, --guest-udp-ports can only be specified when tunnelling network"
+
+    if [ ${#port_forward_args[@]} -ne 0 ] ; then
+        echo >&2 "$0: options for port forwarding can only be specified when tunnelling network"
         exit 1
     fi
     if [ "$no_tap" -ne 0 ] || [ "$inbound_tap" -ne 0 ] ; then
@@ -653,11 +651,14 @@ EOF
         pasta_args+=( --host-lo-to-ns-lo )
     fi
 
-    # Pasta's port forwarding
-    pasta_args+=(
-        --tcp-ports "${guest_tcp_ports:-none}" --udp-ports "${guest_udp_ports:-none}"
-        --tcp-ns "${host_tcp_ports:-none}" --udp-ns "${host_udp_ports:-none}"
-    )
+    # Pasta's port forwarding.  We supply a default of "none" for each of the 
+    # 4 port-forwarding options, if no instance of that option has been specified
+    # to this script, to override pasta's unwanted default of "auto".
+    [ $has_host_tcp_ports -ne 0 ] || port_forward_args+=( --tcp-ns none )
+    [ $has_host_udp_ports -ne 0 ] || port_forward_args+=( --udp-ns none )
+    [ $has_guest_tcp_ports -ne 0 ] || port_forward_args+=( --tcp-ports none )
+    [ $has_guest_udp_ports -ne 0 ] || port_forward_args+=( --udp-ports none )
+    pasta_args+=( "${port_forward_args[@]}" )
 
     # Launch bwrap wrapped in pasta.
     # pasta creates the network namespace that does Layer-4 tunnelling.
