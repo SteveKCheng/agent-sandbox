@@ -59,7 +59,6 @@ host_name=
 is_openssh=0
 share_net=0
 tunnel_net=0
-forward_net=0
 port_forward_args=()
 has_host_tcp_ports=0
 has_host_udp_ports=0
@@ -113,10 +112,8 @@ Options:
   -N, --share-net            Share network with the host
   -n, --tunnel-net           Sandbox tunnels network communications to host,
                              using "pasta"
-  -F, --forward-net          Sandbox has loopback network with port forwarding,
-                             using "specchio"
 
- Network tunnelling:
+ Port forwarding (not applicable with --share-net):
 
   --host-tcp-ports SPEC      TCP listeners from host to forward into the sandbox.
                              SPEC specifies ports, as described in pasta's manual.
@@ -134,12 +131,13 @@ Options:
                              SPEC specifies ports, as described in pasta's manual.
                              Default is "none": no ports forwarded.
 
-  --no-tap                   Do not create TAP device in the sandbox when tunnelling 
-                             the network; pasta will only forward traffic between the 
-                             host and the guest's loopback interfaces.  The sandbox
-                             will not be able to make outbound connections except
-                             those explicitly forwarded using --host-tcp-ports
-                             or --host-udp-ports.
+ Network tunnelling with pasta (applicable with --tunnel-net):
+
+  --no-tap                   Do not create TAP device in the sandbox; pasta will 
+                             only forward traffic between the host and the guest's 
+                             loopback interfaces.  The sandbox will not be able to 
+                             make outbound connections except those explicitly 
+                             forwarded using --host-tcp-ports or --host-udp-ports.
 
   --inbound-tap              Connections forwarded from the host into the sandbox are
                              delivered through the TAP device instead of splicing
@@ -174,8 +172,8 @@ EOF
 # Call GNU getopt to canonicalize arguments.
 # -o defines short options ('h' takes no arg, 'n:' takes a required arg)
 # -l defines long options ('help' takes no arg, 'name:' takes a required arg)
-short_options="de:E:f:h:SNnFrw:"
-long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,forward-net,root,work-manifest:,ro-bind:,rw-bind:,host-tcp-ports:,host-udp-ports:,guest-tcp-ports:,guest-udp-ports:,no-tap,inbound-tap,bwrap-path:,pasta-path:"
+short_options="de:E:f:h:SNnrw:"
+long_options="help,version,dry-run,etc-dir:,env-file:,env:,filter-file:,host-name:,openssh,share-net,tunnel-net,root,work-manifest:,ro-bind:,rw-bind:,host-tcp-ports:,host-udp-ports:,guest-tcp-ports:,guest-udp-ports:,no-tap,inbound-tap,bwrap-path:,pasta-path:"
 parsed=$(getopt -o "$short_options" --long "$long_options" -n "$0" -- "$@")
 if [ $? -ne 0 ]; then
     exit 1
@@ -197,7 +195,6 @@ while true; do
         -S|--openssh)     is_openssh=1; shift;;
         -N|--share-net)   share_net=1; shift;;
         -n|--tunnel-net)  tunnel_net=1; shift;;
-        -F|--forward-net) forward_net=1; shift;;
         -w|--work-manifest) work_manifest_files+=("$2"); shift 2;;
         -r|--root)        become_root=1; shift;;
 
@@ -250,8 +247,8 @@ while true; do
     esac
 done
 
-if (( share_net + tunnel_net + forward_net > 1 )) ; then
-    echo >&2 "$0: at most one of --share-net, --tunnel-net, --forward-net can be specified"
+if (( share_net + tunnel_net > 1 )) ; then
+    echo >&2 "$0: at most one of --share-net, --tunnel-net can be specified"
     exit 1
 fi
 
@@ -519,8 +516,8 @@ if [ "$tunnel_net" -eq 0 ] ; then
     fi
 fi
 
-if [ "$tunnel_net" -eq 0 ] && [ "$forward_net" -eq 0 ] && [ ${#port_forward_args[@]} -ne 0 ] ; then
-    echo >&2 "$0: options for port forwarding can only be specified when tunnelling network"
+if [ "$share_net" -ne 0 ] && [ ${#port_forward_args[@]} -ne 0 ] ; then
+    echo >&2 "$0: options for port forwarding cannot be specified when sharing the network"
     exit 1
 fi
 
@@ -705,25 +702,6 @@ EOF
         /bin/bash "$0" --config-tunnel-net "$tmp_dir" \
             "$bwrap_path" --args 137 "$@"
 
-# Use specchio to set up port forwarding.  
-# It looks very much like the code path for pasta, but much simplified.
-elif [ "$forward_net" -ne 0 ] ; then
-
-    # Check for existence of specchio
-    if [ ! -x "$specchio_path" ] ; then
-        echo >&2 "$0: the specchio program is required for --forward-net but could not be found"
-        exit 2
-    fi
-
-    generate_etc_hosts_for_local_only
-    bwrap_args+=( --perms 444 --file 141 /etc/hosts )
-
-    commit_bwrap_args
-
-    "$specchio_path" "${port_forward_args[@]}" -- \
-        /bin/bash "$0" --config-isolate-net "$tmp_dir" \
-            "$bwrap_path" --args 137 "$@"
-
 elif [ "$share_net" -ne 0 ] ; then
 
     # When the sandbox is sharing the host's network, 
@@ -740,29 +718,42 @@ elif [ "$share_net" -ne 0 ] ; then
 
 else
 
+    # specchio is needed if there is any port forwarding.  
+    if [ "${#port_forward_args[@]}" -gt 0 ] && ! [ -x "$specchio_path" ] ; then
+        echo >&2 "$0: the specchio program is required for port forwarding but could not be found"
+        exit 2
+    fi
+
     generate_etc_hosts_for_local_only
 
     bwrap_args+=( --perms 444 --file 141 /etc/hosts )
     commit_bwrap_args
 
-    # If bwrap is asked to "unshare" the network namespace, it does no set-up
-    # whatsoever and that means the loopback interface is not even up.
-    # Also, unprivileged pinging is not allowed.  That is not good if the 
-    # sandboxed program wants to bring up local testing servers.  
-    #
-    # We cannot set up the network once inside bwrap, because
-    # we do not have the privileges to do so if UID != 0.
-    #
-    # We must do the set up *outside* bwrap and then let it inherit the
-    # newly set-up network namespace, just like what happens when we 
-    # use "pasta" to implement --tunnel-net, above.
-    #
-    # Flags to "unshare":
-    #   -U: create throw-away user namespace
-    #   -r: maps to fake root there
-    #   -n: creates network namespace
-    unshare -Urn /bin/bash "$0" --config-isolate-net "$tmp_dir" \
-        "$bwrap_path" --args 137 "$@"
+    inner_command=(
+        /bin/bash "$0" --config-isolate-net "$tmp_dir" 
+            "$bwrap_path" --args 137 "$@"
+    )
 
+    if [ "${#port_forward_args[@]}" -gt 0 ] ; then
+        "$specchio_path" "${port_forward_args[@]}" -- "${inner_command[@]}"
+    else
+        # If bwrap is asked to "unshare" the network namespace, it does no set-up
+        # whatsoever and that means the loopback interface is not even up.
+        # Also, unprivileged pinging is not allowed.  That is not good if the 
+        # sandboxed program wants to bring up local testing servers.  
+        #
+        # We cannot set up the network once inside bwrap, because
+        # we do not have the privileges to do so if UID != 0.
+        #
+        # We must do the set up *outside* bwrap and then let it inherit the
+        # newly set-up network namespace, just like what happens when we 
+        # use "pasta" to implement --tunnel-net, above.
+        #
+        # Flags to "unshare":
+        #   -U: create throw-away user namespace
+        #   -r: maps to fake root there
+        #   -n: creates network namespace
+        unshare -Urn "${inner_command[@]}"
+    fi
 fi
 
