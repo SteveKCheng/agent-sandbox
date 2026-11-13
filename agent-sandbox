@@ -298,22 +298,29 @@ bwrap_args=(
   --unshare-cgroup-try
 )
 
-# Enable networking if requested.
-# (For "tunnelling", bwrap inherits not the host's network namespace 
-#  but the network namespace set up by pasta, below.)
 if [ "$share_net" -ne 0 ] ; then
-    # And therefore we must disallow overriding the sandbox's machine name,
-    # because any new name would be inconsistent with the existing files above.
+    # Disallow overriding the sandbox's machine name when sharing the network.
+    # It does not make sense, and any new name would be inconsistent with
+    # files like /etc/hosts that get mounted from the host.
     if [ -n "${host_name}" ] ; then
         echo >&2 "$0: cannot override host name of sandbox when sharing existing network"
         exit 1
     fi
 else
-    # Set host name for sandbox
-    bwrap_args+=( --unshare-uts )
-    if [ -n "${host_name}" ] ; then
-        bwrap_args+=( --hostname "${host_name}" )
+    # Assign a default name so typical shell prompts will show the user
+    # is in the sandbox
+    if [ -z "${host_name}" ] ; then 
+        host_name="$(/bin/hostname)"
+        host_name="${host_name:-agent}-sandbox"
+
+    # The name "gateway" is reserved for setting up pasta's TAP interface
+    elif [ "$tunnel_net" -ne 0 ] && [ "${host_name,,}" = "gateway" ] ; then
+        echo >&2 "$0: sandbox cannot be named 'gateway'"
+        exit 2
     fi
+
+    # Set the host name for sandbox
+    bwrap_args+=( --unshare-uts --hostname "${host_name}")
 fi
 
 # We explicitly set bwrap to become the target *real* user & group, to make
@@ -588,17 +595,6 @@ if [ "$tunnel_net" -ne 0 ] ; then
         exit 2
     fi
 
-    if [ -z "${host_name}" ] ; then 
-        host_name="$(/bin/hostname)"
-        host_name="${host_name:-agent-sandbox}"
-        bwrap_args+=( --hostname ${host_name} )
-    fi
-
-    if [ "${host_name}" = "gateway" ] ; then
-        echo >&2 "$0: sandbox cannot be named 'gateway'"
-        exit 2
-    fi
-
     # Let the inner script know about the NFT filter file passed in by the user.
     #
     # Ideally we would check validity first, so that the sandbox is not started half-way 
@@ -717,12 +713,6 @@ elif [ "$forward_net" -ne 0 ] ; then
     if [ ! -x "$specchio_path" ] ; then
         echo >&2 "$0: the specchio program is required for --forward-net but could not be found"
         exit 2
-    fi
-
-    if [ -z "${host_name}" ] ; then 
-        host_name="$(/bin/hostname)"
-        host_name="${host_name:-agent-sandbox}"
-        bwrap_args+=( --hostname ${host_name} )
     fi
 
     generate_etc_hosts_for_local_only
